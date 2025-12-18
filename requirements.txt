@@ -19,5 +19,5 @@ pillow==9.5.0
 python-dotenv
 plotly
 reportlab
-
+schedule
 
