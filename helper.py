@@ -110,21 +110,22 @@ def get_financial_year(date_obj: date = None) -> int:
 # CALCULATION UTILITIES
 # ============================================
 
-def calculate_progress(achieved: float, target: float) -> float:
-    """
-    Calculate progress percentage
+def calculate_progress(achieved, target):
+    """Calculate progress percentage - handles None values safely"""
+    # Handle None values
+    if achieved is None:
+        achieved = 0
+    if target is None or target == 0:
+        return 0
     
-    Args:
-        achieved: Achieved value
-        target: Target value
-        
-    Returns:
-        Progress percentage (capped at 100)
-    """
-    if target <= 0:
-        return 0.0
-    progress = (achieved / target) * 100
-    return min(progress, 100.0)
+    # Convert to float to handle both int and float
+    try:
+        achieved = float(achieved)
+        target = float(target)
+        progress = (achieved / target) * 100
+        return min(progress, 100)
+    except (TypeError, ValueError):
+        return 0
 
 
 def calculate_total_achievement(week1: float, week2: float, week3: float, week4: float) -> float:
@@ -551,6 +552,8 @@ def apply_theme():
     </style>
     """, unsafe_allow_html=True)
 
+    
+
 
 
 # ============================================
@@ -566,12 +569,12 @@ def render_user_avatar(user: Dict):
     """
     st.markdown(f"""
     <div style='text-align: center; padding: 20px;'>
-        <div style='width: 80px; height: 80px; background: linear-gradient(135deg, #2dccff 0%, #1ea8d9 100%);
+        <div style='width: 80px; height: 80px; background: linear-gradient(135deg, #2DCCFF, #9BBCE0);
                     border-radius: 50%; margin: 0 auto 15px; display: flex; align-items: center; 
                     justify-content: center; color: white; font-size: 32px; font-weight: bold;'>
             {user['name'][0].upper()}
         </div>
-        <h3 style='margin: 0; color: white'>{user['name']}</h3>
+        <h3 style='margin: 0; color: #ffffff;'>{user['name']}</h3>
         <p style='color: #64748b; margin: 5px 0;'>{user.get('designation', 'Employee')}</p>
         <span style='background: #dbeafe; color: #1e40af; padding: 5px 15px; 
                      border-radius: 15px; font-size: 12px; font-weight: 600;'>
@@ -579,6 +582,7 @@ def render_user_avatar(user: Dict):
         </span>
     </div>
     """, unsafe_allow_html=True)
+
 
 def render_card(title: str, subtitle: str = "", icon: str = ""):
     """Professional standalone card component"""
@@ -600,41 +604,90 @@ def render_card(title: str, subtitle: str = "", icon: str = ""):
     </div>
     """, unsafe_allow_html=True)
 
-def render_metric_card(
-    label: str,
-    value: str,
-    color: str = "#2dccff",
-    delta: Optional[str] = None,
-):
-    """Clean, professional metric card without icons"""
-    
-    delta_html = ""
-    if delta:
-        delta_color = "#10b981" if "+" in str(delta) else "#ef4444"
-        delta_html = f"<div style='font-size: 13px; color: {delta_color}; margin-top: 12px; font-weight: 500;'>{delta}</div>"
 
+def render_metric_card(label, value, color="#3B82F6", icon=""):
+    """Render a pretty metric card with light colors"""
+    
+    # Light color variations
+    light_colors = {
+        "#3B82F6": "#EFF6FF",  # Light blue
+        "#10B981": "#ECFDF5",  # Light green
+        "#F5576C": "#FEF2F2",  # Light red/pink
+        "#00C9FF": "#F0F9FF",  # Light cyan
+        "#EF4444": "#FEF2F2",  # Light red
+        "#F59E0B": "#FFFBEB",  # Light amber
+        "#8b5cf6": "#F5F3FF",  # Light purple
+        "#ec4899": "#FDF2F8",  # Light pink
+        "#764BA2": "#FAF5FF",  # Light violet
+        "#38F9D7": "#F0FDFA",  # Light teal
+    }
+    
+    bg_color = light_colors.get(color, "#F9FAFB")
+    
     st.markdown(f"""
-    <div style='background: linear-gradient(to bottom, #ffffff 0%, #f8fafc 100%); border-radius: 12px; padding: 24px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.06); border: 1px solid rgba(226, 232, 240, 0.8); transition: all 0.3s ease; position: relative; overflow: hidden;'>
-        <div style='position: absolute; top: 0; left: 0; width: 4px; height: 100%; background: {color};'></div>
-        <div style='color: {color}; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px;'>{label}</div>
-        <div style='color: #1e293b; font-size: 36px; font-weight: 700; line-height: 1; margin-bottom: 8px;'>{value}</div>
-        {delta_html}
+    <div style="
+        background: linear-gradient(135deg, {bg_color} 0%, white 100%);
+        padding: 20px;
+        border-radius: 15px;
+        border: 1px solid {color}20;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        text-align: center;
+        transition: transform 0.2s;
+        height: 140px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    ">
+        <div style="font-size: 36px; margin-bottom: 8px;">{icon}</div>
+        <div style="font-size: 32px; font-weight: bold; color: {color}; margin-bottom: 8px;">
+            {value}
+        </div>
+        <div style="font-size: 14px; color: #64748b; font-weight: 500;">
+            {label}
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
 
-def render_progress_bar(progress: float, label: str = ""):
-    """Render a custom progress bar"""
-    color = get_status_color(progress)
+def render_progress_bar(progress, goal_title=""):
+    """Render a pretty light-colored progress bar"""
+    
+    # Determine color based on progress
+    if progress >= 100:
+        color = "#A7F3D0"  # Light green
+        border_color = "#10B981"
+    elif progress >= 75:
+        color = "#BFDBFE"  # Light blue
+        border_color = "#3B82F6"
+    elif progress >= 50:
+        color = "#FED7AA"  # Light orange
+        border_color = "#F59E0B"
+    else:
+        color = "#FECACA"  # Light red
+        border_color = "#EF4444"
     
     st.markdown(f"""
-    <div style='margin: 10px 0;'>
-        <div style='display: flex; justify-content: space-between; margin-bottom: 5px;'>
-            <span>{label}</span>
-            <span style='font-weight: 600;'>{progress:.1f}%</span>
-        </div>
-        <div style='background: #e2e8f0; height: 8px; border-radius: 4px; overflow: hidden;'>
-            <div style='background: {color}; height: 100%; width: {progress}%; transition: width 0.3s;'></div>
+    <div style="
+        background: #F3F4F6;
+        border-radius: 20px;
+        height: 30px;
+        overflow: hidden;
+        border: 2px solid {border_color}30;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    ">
+        <div style="
+            width: {min(progress, 100)}%;
+            height: 100%;
+            background: linear-gradient(90deg, {color} 0%, {border_color}80 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #1F2937;
+            font-weight: 600;
+            font-size: 13px;
+            transition: width 0.5s ease;
+        ">
+            {progress:.1f}%
         </div>
     </div>
     """, unsafe_allow_html=True)
