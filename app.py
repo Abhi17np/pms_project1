@@ -34,11 +34,91 @@ from email.mime.multipart import MIMEMultipart
 import secrets
 import os
 from datetime import datetime, timedelta
-import streamlit.components.v1 as components
 from monthly_reminder import start_reminder_scheduler, test_send_reminder
 from monthly_reminder import send_goal_completion_email
+import streamlit as st
+import streamlit.components.v1 as components
+import textwrap
+
+def metric_card(
+    value,
+    label,
+    color,
+    shadow_rgba,
+    icon=None,
+    suffix="",
+    label_bg=None
+):
+    import streamlit as st
+
+    icon_html = f'<div style="font-size:34px; margin-bottom:10px;">{icon}</div>' if icon else ""
+    label_bg_css = f"background:{label_bg};" if label_bg else ""
+
+    html = (
+        '<div style="padding:10px;">'
+        '<div style="'
+        'background:#FFFFFF;'
+        'width:120%;'
+        'height:170px;'
+        'padding:20px;'
+        'border-radius:14px;'
+        'display:flex;'
+        'text-align:center;'
+        'flex-direction:column;'
+        'justify-content:center;'
+        'align-items:center;'
+        'box-shadow:0 4px 10px rgba(0,0,0,0.06),'
+        f'0 0 24px {shadow_rgba};'
+        '">'
+        f'{icon_html}'
+        '<div style="'
+        'font-size:36px;'
+        'font-weight:700;'
+        f'color:{color};'
+        'margin-bottom:8px;'
+        'text-align:center;'
+        '">'
+        f'{value}{suffix}'
+        '</div>'
+        '<div style="'
+        'font-size:13px;'
+        'font-weight:700;'
+        'text-transform:uppercase;'
+        'letter-spacing:0.4px;'
+        f'color:{color};'
+        f'{label_bg_css}'
+        'padding:6px 14px;'
+        'border-radius:8px;'
+        'white-space:nowrap;'      # ✅ keeps text in one line
+        'text-align:center;'       # ✅ centers text
+        'overflow:hidden;'         # ✅ prevents wrap glitches
+        '">'
+        f'{label}'
+        '</div>'
+        '</div>'
+        '</div>'
+    )
+
+    st.markdown(html, unsafe_allow_html=True)
 
 
+def get_fiscal_quarter(month):
+    """
+    Calculate fiscal quarter based on month
+    Q1: April-June (4-6)
+    Q2: July-September (7-9)
+    Q3: October-December (10-12)
+    Q4: January-March (1-3)
+    """
+    if 4 <= month <= 6:
+        return 1
+    elif 7 <= month <= 9:
+        return 2
+    elif 10 <= month <= 12:
+        return 3
+    else:  # 1-3
+        return 4
+    
 def safe_float(value, default=None):  # Changed default from 0 to None
     """Safely convert value to float, handling None and invalid types"""
     if value is None or value == '':
@@ -47,7 +127,19 @@ def safe_float(value, default=None):  # Changed default from 0 to None
         return float(value)
     except (TypeError, ValueError):
         return default
-    
+
+
+
+def normalize_department(dept_name):
+    """Normalize department name to be case-insensitive and handle variations"""
+    if not dept_name or dept_name.strip() == '':
+        return 'Unassigned'
+    # Convert to uppercase and strip whitespace
+    normalized = dept_name.strip().upper()
+    # Handle common variations
+    if normalized in ['N/A', 'NA', 'NONE']:
+        return 'Unassigned'
+    return normalized   
 def get_feedback_giver_role(target_role):
     """Who is allowed to give official feedback to this role?"""
     mapping = {
@@ -72,10 +164,20 @@ def get_role_hierarchy():
 def create_notification(notification_data):
     """Create a new notification in the database"""
     try:
+        # Ensure timezone-aware timestamp
+        if 'created_at' not in notification_data:
+            notification_data['created_at'] = datetime.now(IST).isoformat()
+        
         result = supabase.table('notifications').insert(notification_data).execute()
-        return result.data[0] if result.data else None
+        
+        if result.data and len(result.data) > 0:
+            print(f" Notification created: {notification_data.get('action_type')}")
+            return result.data[0]
+        else:
+            print(f" Failed to create notification: No data returned")
+            return None
     except Exception as e:
-        print(f"Error creating notification: {str(e)}")
+        print(f"  Error creating notification: {str(e)}")
         return None
 
 def notify_goal_created(goal_data, creator_user):
@@ -167,14 +269,15 @@ def notify_goal_approved(goal, approver_user, employee_user):
             'is_read': False,
             'created_at': datetime.now(IST).isoformat()
         })
-
+        
 def notify_weekly_achievement_updated(goal, updater_user, week_num):
     """Notify relevant users when weekly achievement is updated"""
     updater_role = updater_user['role']
     goal_owner = db.get_user_by_id(goal['user_id'])
     
-    # Employee updates -> Notify Manager
+    # Employee updates -> Notify Manager AND HR
     if updater_role == 'Employee':
+        # Notify Manager
         if goal_owner.get('manager_id'):
             manager = db.get_user_by_id(goal_owner['manager_id'])
             if manager:
@@ -188,7 +291,7 @@ def notify_weekly_achievement_updated(goal, updater_user, week_num):
                     'created_at': datetime.now(IST).isoformat()
                 })
         
-        # Also notify HR
+        # ✅ ALWAYS notify HR
         all_users = db.get_all_users()
         hr_users = [u for u in all_users if u['role'] == 'HR']
         for hr in hr_users:
@@ -232,13 +335,25 @@ def notify_weekly_achievement_updated(goal, updater_user, week_num):
                 'created_at': datetime.now(IST).isoformat()
             })
 
+def render_clickable_metric_card(label, value, color, icon, key, detail_type):
+    """Render a clickable metric card that acts as a button"""
+    if st.button(
+        f"{icon}\n\n**{value}**\n\n{label}",
+        key=key,
+        use_container_width=True,
+        help=f"Click to view {label.lower()}"
+    ):
+        st.session_state.show_details = detail_type
+        st.rerun()
+
 def notify_goal_completed(goal, completer_user):
     """Notify relevant users when a goal is completed"""
     completer_role = completer_user['role']
     goal_owner = db.get_user_by_id(goal['user_id'])
     
-    # Employee completes -> Notify Manager
+    # Employee completes -> Notify Manager AND HR
     if completer_role == 'Employee':
+        # Notify Manager
         if goal_owner.get('manager_id'):
             manager = db.get_user_by_id(goal_owner['manager_id'])
             if manager:
@@ -247,12 +362,12 @@ def notify_goal_completed(goal, completer_user):
                     'action_by': completer_user['id'],
                     'action_by_name': completer_user['name'],
                     'action_type': 'goal_completed',
-                    'details': f"✅ {completer_user['name']} completed goal: '{goal['goal_title']}'",
+                    'details': f" {completer_user['name']} completed goal: '{goal['goal_title']}'",
                     'is_read': False,
                     'created_at': datetime.now(IST).isoformat()
                 })
         
-        # Notify HR
+        # ✅ ALWAYS notify HR
         all_users = db.get_all_users()
         hr_users = [u for u in all_users if u['role'] == 'HR']
         for hr in hr_users:
@@ -261,7 +376,7 @@ def notify_goal_completed(goal, completer_user):
                 'action_by': completer_user['id'],
                 'action_by_name': completer_user['name'],
                 'action_type': 'goal_completed',
-                'details': f"✅ {completer_user['name']} completed goal: '{goal['goal_title']}'",
+                'details': f" {completer_user['name']} completed goal: '{goal['goal_title']}'",
                 'is_read': False,
                 'created_at': datetime.now(IST).isoformat()
             })
@@ -276,7 +391,7 @@ def notify_goal_completed(goal, completer_user):
                 'action_by': completer_user['id'],
                 'action_by_name': completer_user['name'],
                 'action_type': 'goal_completed',
-                'details': f"✅ {completer_role} {completer_user['name']} completed goal: '{goal['goal_title']}'",
+                'details': f" {completer_role} {completer_user['name']} completed goal: '{goal['goal_title']}'",
                 'is_read': False,
                 'created_at': datetime.now(IST).isoformat()
             })
@@ -291,7 +406,7 @@ def notify_goal_completed(goal, completer_user):
                 'action_by': completer_user['id'],
                 'action_by_name': completer_user['name'],
                 'action_type': 'goal_completed',
-                'details': f"✅ VP {completer_user['name']} completed goal: '{goal['goal_title']}'",
+                'details': f" VP {completer_user['name']} completed goal: '{goal['goal_title']}'",
                 'is_read': False,
                 'created_at': datetime.now(IST).isoformat()
             })
@@ -443,6 +558,66 @@ def notify_feedback_reply(feedback, replier_user, original_feedback_giver):
     # Employee replies to Manager feedback -> Manager already notified above
     # VP replies to CMD feedback -> CMD already notified above
     # CMD replies to VP feedback -> VP already notified above
+def cleanup_duplicate_notifications():
+    """Remove duplicate notifications from database"""
+    st.title("🧹 Clean Up Duplicate Notifications")
+    
+    user = st.session_state.user
+    if user['role'] not in ['HR', 'CMD']:
+        st.warning("⚠️ Only HR/CMD can clean up notifications")
+        return
+    
+    st.warning("⚠️ This will remove duplicate notifications from the database")
+    
+    if st.button("🗑️ Clean Up Duplicates", type="primary"):
+        try:
+            # Get all notifications
+            all_notifs = supabase.table('notifications').select('*').order(
+                'created_at', desc=True
+            ).execute()
+            
+            if all_notifs.data:
+                seen = {}
+                duplicates = []
+                
+                for notif in all_notifs.data:
+                    # Create unique key
+                    key = f"{notif['user_id']}_{notif['action_type']}_{notif.get('details', '')[:50]}"
+                    
+                    if key in seen:
+                        duplicates.append(notif['id'])
+                    else:
+                        seen[key] = notif['id']
+                
+                st.info(f"Found {len(duplicates)} duplicate notifications")
+                
+                if duplicates:
+                    # Delete duplicates
+                    for dup_id in duplicates:
+                        supabase.table('notifications').delete().eq('id', dup_id).execute()
+                    
+                    st.success(f"✅ Removed {len(duplicates)} duplicate notifications!")
+                else:
+                    st.success("✅ No duplicates found!")
+            
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+    
+    # Show all notifications
+    st.markdown("---")
+    st.subheader(" All System Notifications")
+    
+    try:
+        all_notifs = supabase.table('notifications').select('*').order(
+            'created_at', desc=True
+        ).limit(100).execute()
+        
+        if all_notifs.data:
+            st.dataframe(pd.DataFrame(all_notifs.data), use_container_width=True, height=400)
+        else:
+            st.info("No notifications in database")
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
 
 def notify_goal_edited(goal, editor_user, goal_owner):
     """Notify when a goal is edited"""
@@ -592,7 +767,7 @@ def notify_goal_not_updated(goal, goal_owner, week_num):
         'action_by': goal_owner['id'],
         'action_by_name': 'System',
         'action_type': 'goal_not_updated',
-        'details': f" Week {week_num} achievement not updated for goal: '{goal['goal_title']}'",
+        'details': f"⚠️ Week {week_num} achievement not updated for goal: '{goal['goal_title']}'",
         'is_read': False,
         'created_at': datetime.now(IST).isoformat()
     })
@@ -607,7 +782,7 @@ def notify_goal_not_updated(goal, goal_owner, week_num):
                     'action_by': goal_owner['id'],
                     'action_by_name': goal_owner['name'],
                     'action_type': 'goal_not_updated',
-                    'details': f" {goal_owner['name']} has not updated Week {week_num} for '{goal['goal_title']}'",
+                    'details': f"⚠️ {goal_owner['name']} has not updated Week {week_num} for '{goal['goal_title']}'",
                     'is_read': False,
                     'created_at': datetime.now(IST).isoformat()
                 })
@@ -617,10 +792,19 @@ def check_and_notify_due_dates_and_missing_updates():
     today = date.today()
     all_users = db.get_all_users()
     
+    # ✅ Track what we've already notified to prevent duplicates
+    notified_goals = set()
+    
     for user in all_users:
         goals = db.get_user_all_goals(user['id'])
         
         for goal in goals:
+            goal_id = goal.get('goal_id')
+            
+            # ✅ Skip if we already notified about this goal
+            if goal_id in notified_goals:
+                continue
+            
             if goal.get('status') == 'Active':
                 # Check due dates
                 end_date_str = goal.get('end_date')
@@ -631,7 +815,16 @@ def check_and_notify_due_dates_and_missing_updates():
                         
                         # Notify if due in 5, 4, 3, 2, or 1 days
                         if 1 <= days_remaining <= 5:
-                            notify_goal_due_soon(goal, user, days_remaining)
+                            # ✅ Check if we already sent this notification today
+                            existing_notifs = supabase.table('notifications').select('*').eq(
+                                'user_id', user['id']
+                            ).eq('action_type', 'goal_due_soon').like(
+                                'details', f"%{goal['goal_title']}%{days_remaining} day%"
+                            ).gte('created_at', today.isoformat()).execute()
+                            
+                            if not existing_notifs.data:
+                                notify_goal_due_soon(goal, user, days_remaining)
+                                notified_goals.add(goal_id)
                         
                         # Check if goal is past due and not completed
                         if days_remaining < 0:
@@ -644,9 +837,19 @@ def check_and_notify_due_dates_and_missing_updates():
                             progress = (monthly_achievement / monthly_target * 100) if monthly_target > 0 else 0
                             
                             if progress < 100:
-                                notify_goal_not_completed(goal, user)
-                    except:
-                        pass
+                                # ✅ Check if we already sent this notification
+                                existing_notifs = supabase.table('notifications').select('*').eq(
+                                    'user_id', user['id']
+                                ).eq('action_type', 'goal_not_completed').like(
+                                    'details', f"%{goal['goal_title']}%"
+                                ).gte('created_at', (today - timedelta(days=7)).isoformat()).execute()
+                                
+                                if not existing_notifs.data:
+                                    notify_goal_not_completed(goal, user)
+                                    notified_goals.add(goal_id)
+                    except Exception as e:
+                        print(f"Error checking deadline for goal {goal_id}: {str(e)}")
+                        continue
                 
                 # Check for missing weekly updates (-)
                 current_year = today.year
@@ -663,7 +866,16 @@ def check_and_notify_due_dates_and_missing_updates():
                             week_start, week_end = get_week_dates(current_year, current_month, week_num)
                             
                             if today > week_end:
-                                notify_goal_not_updated(goal, user, week_num)
+                                # ✅ Check if we already sent this notification
+                                existing_notifs = supabase.table('notifications').select('*').eq(
+                                    'user_id', user['id']
+                                ).eq('action_type', 'goal_not_updated').like(
+                                    'details', f"%Week {week_num}%{goal['goal_title']}%"
+                                ).gte('created_at', today.isoformat()).execute()
+                                
+                                if not existing_notifs.data:
+                                    notify_goal_not_updated(goal, user, week_num)
+                                    notified_goals.add(goal_id)
              # Check for all roles (Manager, HR, VP, CMD) about their own goals
         if user['role'] in ['Manager', 'HR', 'VP', 'CMD']:
             goals = db.get_user_all_goals(user['id'])
@@ -715,9 +927,12 @@ def get_user_notifications(user_id, limit=50):
         result = supabase.table('notifications').select('*').eq(
             'user_id', user_id
         ).order('created_at', desc=True).limit(limit).execute()
+        
+        print(f" Query result for user {user_id}: {len(result.data) if result.data else 0} notifications")
+        
         return result.data if result.data else []
     except Exception as e:
-        print(f"Error getting notifications: {str(e)}")
+        print(f" Error getting notifications: {str(e)}")
         return []
 
 def mark_notification_read(notification_id):
@@ -812,19 +1027,19 @@ def check_password_strength(password):
     
     # Determine strength level and color
     if score >= 85:
-        strength = "Very Strong 💪"
+        strength = "Very Strong "
         color = "#10b981"  # Green
     elif score >= 70:
-        strength = "Strong 👍"
+        strength = "Strong "
         color = "#22c55e"  # Light green
     elif score >= 50:
-        strength = "Medium ⚡"
+        strength = "Medium "
         color = "#f59e0b"  # Orange
     elif score >= 30:
-        strength = "Weak ⚠️"
+        strength = "Weak "
         color = "#fb923c"  # Light orange
     else:
-        strength = "Very Weak ❌"
+        strength = "Very Weak "
         color = "#ef4444"  # Red
     
     return score, color, strength, feedback
@@ -841,7 +1056,7 @@ def send_achievement_approval_email(manager_email, employee_name, goal_data, ach
             print("Email configuration not found")
             return False
         
-        subject = f"📊 Achievement Approval Request from {employee_name}"
+        subject = f" Achievement Approval Request from {employee_name}"
         
         # Format achievements display
         achievements_html = ""
@@ -944,7 +1159,7 @@ def send_goal_completion_email(manager_email, employee_name, goal_title, complet
             return False
         
         if completed:
-            subject = f" Goal Completed: {employee_name}"
+            subject = f"✅ Goal Completed: {employee_name}"
             status_color = "#10b981"
             status_icon = "✅"
             status_text = "COMPLETED"
@@ -1112,34 +1327,53 @@ def calculate_performance_metrics(goals):
     on_hold = len([g for g in goals if g.get('status') == 'On Hold'])
     cancelled = len([g for g in goals if g.get('status') == 'Cancelled'])
     
-    # Calculate average progress
+    # ✅ FIXED: Calculate average progress with safe_float
     total_progress = 0
     goal_count = 0
-    for goal in goals:
-        progress = calculate_progress(
-            goal.get('monthly_achievement', 0),
-            goal.get('monthly_target', 1)
-        )
-        total_progress += progress
-        goal_count += 1
     
-    avg_progress = total_progress / goal_count if goal_count > 0 else 0
+    for goal in goals:
+        achievement = safe_float(goal.get('monthly_achievement'), None)
+        target = safe_float(goal.get('monthly_target'), 1)
+        
+        if achievement is not None and target > 0:
+            progress = (achievement / target) * 100
+            total_progress += progress
+            goal_count += 1
+    
+    avg_progress = (total_progress / goal_count) if goal_count > 0 else 0
     
     # Calculate completion rate
     completion_rate = (completed / total_goals * 100) if total_goals > 0 else 0
     
-    # Calculate on-time completion rate
+    # ✅ FIXED: Calculate on-time completion rate correctly
     on_time = 0
     overdue = 0
     today = date.today()
     
     for goal in goals:
         if goal.get('status') == 'Completed':
-            end_date = datetime.strptime(str(goal.get('end_date')), '%Y-%m-%d').date()
-            if end_date >= today:
-                on_time += 1
+            end_date_str = goal.get('end_date')
+            completed_at_str = goal.get('completed_at')
+            
+            if end_date_str and completed_at_str:
+                try:
+                    end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                    
+                    # Parse completion timestamp (ISO format)
+                    completed_at = completed_at_str.replace('Z', '+00:00')
+                    completed_date = datetime.fromisoformat(completed_at).date()
+                    
+                    # ✅ CORRECT: Compare completion date vs deadline
+                    if completed_date <= end_date:
+                        on_time += 1
+                    else:
+                        overdue += 1
+                except Exception as e:
+                    # If parsing fails, count as overdue
+                    overdue += 1
             else:
-                overdue += 1
+                # If no completion date or end date, skip
+                pass
     
     on_time_rate = (on_time / completed * 100) if completed > 0 else 0
     
@@ -1320,7 +1554,8 @@ def create_department_performance_chart(goals):
     department_data = {}
     
     for goal in goals:
-        department = goal.get('department', 'Unassigned')
+        # Normalize department name
+        department = normalize_department(goal.get('department'))
         if department not in department_data:
             department_data[department] = {'total': 0, 'completed': 0, 'progress': []}
         
@@ -1334,28 +1569,30 @@ def create_department_performance_chart(goals):
         )
         department_data[department]['progress'].append(progress)
     
-    verticals = list(department_data.keys())
+    # ✅ FIX: Change variable name from 'department' to 'departments' (plural)
+    departments = sorted(list(department_data.keys()))  # Sort alphabetically
     completion_rates = [
-        (department_data[v]['completed'] / department_data[v]['total'] * 100) 
-        if department_data[v]['total'] > 0 else 0 
-        for v in verticals
+        (department_data[d]['completed'] / department_data[d]['total'] * 100) 
+        if department_data[d]['total'] > 0 else 0 
+        for d in departments
     ]
     avg_progress = [
-        sum(department_data[v]['progress']) / len(department_data[v]['progress']) 
-        if department_data[v]['progress'] else 0 
-        for v in verticals
+        sum(department_data[d]['progress']) / len(department_data[d]['progress']) 
+        if department_data[d]['progress'] else 0 
+        for d in departments
     ]
     
+    # ✅ FIX: Use 'departments' (plural) instead of 'department' (singular)
     fig = go.Figure(data=[
-        go.Bar(name='Completion Rate', x=verticals, y=completion_rates, marker_color='#3b82f6'),
-        go.Bar(name='Avg Progress', x=verticals, y=avg_progress, marker_color='#10b981')
+        go.Bar(name='Completion Rate', x=departments, y=completion_rates, marker_color='#3b82f6'),
+        go.Bar(name='Avg Progress', x=departments, y=avg_progress, marker_color='#10b981')
     ])
     
     fig.update_layout(
         barmode='group',
-        title_text="Performance by Vertical",
+        title_text="Performance by Department",
         title_font_size=20,
-        xaxis_title="Vertical",
+        xaxis_title="Department",
         yaxis_title="Percentage (%)",
         height=400
     )
@@ -1564,13 +1801,13 @@ def display_analytics_page():
         st.rerun()
     role = user['role']
     
-    st.title(" Advanced Analytics & Reports")
+    st.title("Advanced Analytics & Reports")
     
     # Filters
     col_filter1, col_filter2, col_filter3 = st.columns(3)
     
     with col_filter1:
-        if role == 'HR':
+        if role in ['CMD', 'VP', 'HR']:
             all_users = db.get_all_users()
             selected_user = st.selectbox(
                 "Select User",
@@ -1609,14 +1846,17 @@ def display_analytics_page():
     
     # Get goals based on period
     all_goals = db.get_user_all_goals(analysis_user['id'])
+    today = date.today()
     
     if analysis_period == "Current Month":
         today = date.today()
         goals = [g for g in all_goals if g['year'] == today.year and g.get('month') == today.month]
     elif analysis_period == "Current Quarter":
-        today = date.today()
-        quarter = ((today.month - 1) // 3) + 1
-        goals = [g for g in all_goals if g['year'] == today.year and g.get('quarter') == quarter]
+        current_quarter = get_fiscal_quarter(today.month)
+        goals = [g for g in all_goals 
+                if g['year'] == today.year 
+                and g.get('month') 
+                and get_fiscal_quarter(g.get('month')) == current_quarter]
     elif analysis_period == "Current Year":
         today = date.today()
         goals = [g for g in all_goals if g['year'] == today.year]
@@ -1638,20 +1878,99 @@ def display_analytics_page():
         
         # KPI Cards
         col1, col2, col3, col4, col5 = st.columns(5)
-        
+
         with col1:
-            render_metric_card("Total Goals", str(metrics['total_goals']), color="#3b82f6")
+            render_clickable_metric_card("Total Goals", str(metrics['total_goals']), "#3B82F6", "🎯", "analytics_card_total", 'analytics_total')
+
         with col2:
-            render_metric_card("Completed", str(metrics['completed']), color="#10b981")
+            render_clickable_metric_card("Completed", str(metrics['completed']), "#10B981", "✅", "analytics_card_completed", 'analytics_completed')
+
         with col3:
-            render_metric_card("Active", str(metrics['active']), color="#f59e0b")
+            render_clickable_metric_card("Active", str(metrics['active']), "#F5576C", "🔄", "analytics_card_active", 'analytics_active')
+
         with col4:
-            render_metric_card("Completion Rate", f"{int(metrics['completion_rate'])}%", color="#8b5cf6")
+            render_clickable_metric_card("Completion Rate", f"{int(metrics['completion_rate'])}%", "#8b5cf6", "📊", "analytics_card_completion", 'analytics_completion')
+
         with col5:
-            render_metric_card("Avg Progress", str(metrics['avg_progress']), color="#ec4899")
+            render_clickable_metric_card("Avg Progress", f"{int(metrics['avg_progress'])}%", "#ec4899", "📈", "analytics_card_progress", 'analytics_progress')
         
-        st.markdown("---")
-        
+        # Analytics details modal
+        if st.session_state.get('show_details') and st.session_state.get('show_details').startswith('analytics_'):
+            st.markdown("---")
+            detail_type = st.session_state.show_details
+            
+            col_header, col_close = st.columns([5, 1])
+            
+            with col_header:
+                if detail_type == 'analytics_total':
+                    st.subheader(f" All Goals ({metrics['total_goals']})")
+                elif detail_type == 'analytics_completed':
+                    st.subheader(f" Completed Goals ({metrics['completed']})")
+                elif detail_type == 'analytics_active':
+                    st.subheader(f" Active Goals ({metrics['active']})")
+                elif detail_type == 'analytics_completion':
+                    st.subheader(f" Goals by Completion Rate")
+                elif detail_type == 'analytics_progress':
+                    st.subheader(f" Goals by Progress")
+            
+            with col_close:
+                if st.button(" Close", key="close_analytics_details"):
+                    del st.session_state.show_details
+                    st.rerun()
+            
+            # Filter goals based on detail type
+            if detail_type == 'analytics_completed':
+                display_goals = [g for g in goals if g.get('status') == 'Completed']
+            elif detail_type == 'analytics_active':
+                display_goals = [g for g in goals if g.get('status') == 'Active']
+            elif detail_type == 'analytics_completion' or detail_type == 'analytics_progress':
+                display_goals = goals.copy()
+                for g in display_goals:
+                    achievement = g.get('monthly_achievement')
+                    target = g.get('monthly_target', 1)
+                    achievement_val = 0 if achievement is None else achievement
+                    target_val = 1 if target is None or target == 0 else target
+                    g['_progress'] = calculate_progress(achievement_val, target_val)
+                display_goals.sort(key=lambda x: x['_progress'], reverse=True)
+            else:
+                display_goals = goals
+            
+            # Display goals in table
+            if display_goals:
+                goal_data = []
+                for goal in display_goals:
+                    monthly_achievement = goal.get('monthly_achievement')
+                    monthly_target = goal.get('monthly_target', 1)
+                    achievement_value = 0 if monthly_achievement is None else monthly_achievement
+                    target_value = 1 if monthly_target is None or monthly_target == 0 else monthly_target
+                    progress = calculate_progress(achievement_value, target_value)
+                    
+                    goal_data.append({
+                        'Goal Title': goal['goal_title'],
+                        'Department': goal.get('department', 'N/A'),
+                        'Month': get_month_name(goal.get('month', 1)),  # ADD THIS
+                        'Year': str(goal['year']),  # ADD THIS
+                        'Target': monthly_target if monthly_target is not None else 0,
+                        'Achievement': monthly_achievement if monthly_achievement is not None else '-',
+                        'Progress': f"{progress:.1f}%",
+                        'Status': goal.get('status', 'Active')
+                    })
+                
+                df_goals = pd.DataFrame(goal_data)
+                st.dataframe(df_goals, use_container_width=True, height=400)
+                
+                st.download_button(
+                    "📥 Export to CSV",
+                    df_goals.to_csv(index=False).encode('utf-8'),
+                    f"analytics_goals_{detail_type}.csv",
+                    "text/csv",
+                    key='download_analytics_details'
+                )
+            else:
+                st.info("No goals found in this category")
+            
+            st.markdown("---")
+
         # Charts Row 1
         col_chart1, col_chart2 = st.columns(2)
         
@@ -1812,7 +2131,7 @@ def display_analytics_page():
                     st.markdown("---")
                     
                     # Comparison table with ranking
-                    st.subheader(" Detailed Comparison Table")
+                    st.subheader("📊 Detailed Comparison Table")
                     
                     # Sort by completion rate for ranking
                     df_sorted = df_compare.sort_values('Completion Rate', ascending=False).reset_index(drop=True)
@@ -1860,7 +2179,7 @@ def display_analytics_page():
                             elif diff < 0:
                                 st.warning(f"⚠️ **Below Average**\n\n{analysis_user['name']}'s completion rate: **{user_completion:.1f}%**\n\nGroup average: **{avg_completion:.1f}%**\n\nDifference: **{abs(diff):.1f}%** lower")
                             else:
-                                st.info(f" **Average Performance**\n\n{analysis_user['name']}'s completion rate: **{user_completion:.1f}%**\n\nMatches group average: **{avg_completion:.1f}%**")
+                                st.info(f"📊 **Average Performance**\n\n{analysis_user['name']}'s completion rate: **{user_completion:.1f}%**\n\nMatches group average: **{avg_completion:.1f}%**")
                         
                         with col_insight2:
                             st.markdown("**Progress Analysis:**")
@@ -1870,7 +2189,7 @@ def display_analytics_page():
                             elif prog_diff < 0:
                                 st.warning(f"⚠️ **Below Average**\n\n{analysis_user['name']}'s avg progress: **{user_progress:.1f}%**\n\nGroup average: **{avg_progress:.1f}%**\n\nDifference: **{abs(prog_diff):.1f}%** lower")
                             else:
-                                st.info(f" **Average Performance**\n\n{analysis_user['name']}'s avg progress: **{user_progress:.1f}%**\n\nMatches group average: **{avg_progress:.1f}%**")
+                                st.info(f"📊 **Average Performance**\n\n{analysis_user['name']}'s avg progress: **{user_progress:.1f}%**\n\nMatches group average: **{avg_progress:.1f}%**")
                         
                         # Top performer
                         st.markdown("---")
@@ -1878,7 +2197,7 @@ def display_analytics_page():
                         if top_performer['Is_Current']:
                             st.success(f" **Congratulations!** {analysis_user['name']} has the highest completion rate ({top_performer['Completion Rate']:.1f}%) in the group!")
                         else:
-                            st.info(f"**Top Performer:** {top_performer['Display_Name']} leads with **{top_performer['Completion Rate']:.1f}%** completion rate")
+                            st.info(f" **Top Performer:** {top_performer['Display_Name']} leads with **{top_performer['Completion Rate']:.1f}%** completion rate")
                     
                 else:
                     st.info("No comparison data available - users need to have goals to be included in comparison")
@@ -1889,7 +2208,7 @@ def display_analytics_page():
     
     # Detailed Tab
     elif view_type == "Detailed":
-        st.subheader(f"Detailed Goal Analysis - {analysis_user['name']}")
+        st.subheader(f"📋 Detailed Goal Analysis - {analysis_user['name']}")
         
         # Goals breakdown by status
         st.markdown("### Goals by Status")
@@ -1912,7 +2231,7 @@ def display_analytics_page():
                     col1, col2, col3 = st.columns([3, 1, 1])
                     with col1:
                         st.markdown(f"**{goal['goal_title']}**")
-                        st.caption(f"Vertical: {goal.get('vertical', 'N/A')} | KPI: {goal.get('kpi', 'N/A')}")
+                        st.caption(f"Department: {goal.get('department', 'N/A')} | KPI: {goal.get('kpi', 'N/A')}")
                     with col2:
                         st.metric("Target", goal.get('monthly_target', 0))
                     with col3:
@@ -1934,8 +2253,16 @@ def display_analytics_page():
         
         for goal in goals:
             for week in range(1, 5):
-                weekly_data[f'Week {week}']['target'] += goal.get(f'week{week}_target', 0)
-                weekly_data[f'Week {week}']['achievement'] += goal.get(f'week{week}_achievement', 0)
+                # Handle None values properly
+                week_target = goal.get(f'week{week}_target')
+                week_achievement = goal.get(f'week{week}_achievement')
+                
+                # Add only if not None
+                if week_target is not None:
+                    weekly_data[f'Week {week}']['target'] += week_target
+                
+                if week_achievement is not None:
+                    weekly_data[f'Week {week}']['achievement'] += week_achievement
         
         weekly_df = pd.DataFrame({
             'Week': list(weekly_data.keys()),
@@ -1949,6 +2276,73 @@ def display_analytics_page():
                            height=400)
         st.plotly_chart(fig_weekly, use_container_width=True)
     
+        st.markdown("---")
+
+        st.markdown("### Monthly Performance Breakdown")
+
+        # Create monthly data structure
+        monthly_data = {}
+
+        for goal in goals:
+            goal_month = goal.get('month')
+            goal_year = goal.get('year', today.year)
+            
+            if goal_month:
+                month_key = f"{get_month_name(goal_month)} {goal_year}"
+                
+                if month_key not in monthly_data:
+                    monthly_data[month_key] = {'target': 0, 'achievement': 0, 'month_num': goal_month, 'year': goal_year}
+                
+                # Add targets and achievements (handle None values)
+                monthly_target = safe_float(goal.get('monthly_target'), 0)
+                monthly_achievement = safe_float(goal.get('monthly_achievement'), 0)
+                
+                monthly_data[month_key]['target'] += monthly_target
+                monthly_data[month_key]['achievement'] += monthly_achievement
+
+        if monthly_data:
+            # Sort by year and month
+            sorted_months = sorted(monthly_data.items(), key=lambda x: (x[1]['year'], x[1]['month_num']))
+            
+            # Create dataframe
+            monthly_df = pd.DataFrame({
+                'Month': [item[0] for item in sorted_months],
+                'Target': [item[1]['target'] for item in sorted_months],
+                'Achievement': [item[1]['achievement'] for item in sorted_months]
+            })
+            
+            # Display as table
+            st.dataframe(monthly_df, use_container_width=True)
+            
+            # Display as chart
+            fig_monthly = px.bar(
+                monthly_df, 
+                x='Month', 
+                y=['Target', 'Achievement'],
+                title="Monthly Targets vs Achievements",
+                barmode='group',
+                height=400,
+                color_discrete_map={'Target': '#3b82f6', 'Achievement': '#10b981'}
+            )
+            fig_monthly.update_layout(xaxis_tickangle=-45)
+            st.plotly_chart(fig_monthly, use_container_width=True)
+            
+            # Summary metrics
+            col_m1, col_m2, col_m3 = st.columns(3)
+            
+            total_monthly_target = monthly_df['Target'].sum()
+            total_monthly_achievement = monthly_df['Achievement'].sum()
+            monthly_completion_rate = (total_monthly_achievement / total_monthly_target * 100) if total_monthly_target > 0 else 0
+            
+            with col_m1:
+                st.metric("Total Monthly Target", f"{total_monthly_target:.2f}")
+            with col_m2:
+                st.metric("Total Monthly Achievement", f"{total_monthly_achievement:.2f}")
+            with col_m3:
+                st.metric("Overall Completion Rate", f"{monthly_completion_rate:.1f}%")
+        else:
+            st.info("No monthly performance data available")
+
     # Export Report
     st.markdown("---")
     st.subheader("📥 Export Report")
@@ -1966,14 +2360,27 @@ def display_analytics_page():
                     mime="application/pdf",
                     use_container_width=True
                 )
-    
+
     with col_export2:
         if st.button(" Export to Excel", use_container_width=True):
-            # Create Excel with metrics
-            excel_buffer = export_goals_to_excel(analysis_user['id'], 
-                                                 goals[0]['year'] if goals else date.today().year,
-                                                 goals[0].get('quarter', 1) if goals else 1,
-                                                 goals[0].get('month', 1) if goals else 1)
+            # Get the first goal's date or use current date
+            if goals:
+                export_year = goals[0]['year']
+                export_quarter = goals[0].get('quarter', 1)
+                export_month = goals[0].get('month', 1)
+            else:
+                today = date.today()
+                export_year = today.year
+                export_quarter = ((today.month - 1) // 3) + 1
+                export_month = today.month
+            
+            excel_buffer = export_goals_to_excel(
+                analysis_user['id'], 
+                export_year,
+                export_quarter,
+                export_month
+            )
+            
             if excel_buffer:
                 st.download_button(
                     label="📥 Download Excel Report",
@@ -1982,6 +2389,8 @@ def display_analytics_page():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
+            else:
+                st.warning("No data to export")
 def get_completable_goals(user_id):
     """Get all goals that can be auto-completed"""
     all_goals = db.get_user_all_goals(user_id)
@@ -2222,7 +2631,7 @@ def render_password_strength_meter(password, key_suffix=""):
     
     # Show feedback if password is not very strong
     if score < 85 and feedback:
-        with st.expander(" Tips to strengthen your password", expanded=False):
+        with st.expander("💡 Tips to strengthen your password", expanded=False):
             for tip in feedback:
                 st.markdown(f"- {tip}")
             
@@ -2342,20 +2751,68 @@ if 'reminder_scheduler_started' not in st.session_state:
     st.session_state.reminder_scheduler_started = True
 
 # Start daily notification checker
-if 'notification_checker_started' not in st.session_state:
-    import threading
-    import time
-    
-    def run_daily_checker():
-        while True:
-            check_and_notify_due_dates_and_missing_updates()
-            # Run once per day (86400 seconds)
-            time.sleep(86400)
-    
-    checker_thread = threading.Thread(target=run_daily_checker, daemon=True)
-    checker_thread.start()
-    st.session_state.notification_checker_started = True
+# ✅ DISABLE AUTO CHECKER - It's creating duplicate notifications
+# Instead, we'll check only when goals are created/updated
 
+# Start daily notification checker - DISABLED
+# if 'notification_checker_started' not in st.session_state:
+#     import threading
+#     import time
+#     
+#     def run_daily_checker():
+#         while True:
+#             check_and_notify_due_dates_and_missing_updates()
+#             # Run once per day (86400 seconds)
+#             time.sleep(86400)
+#     
+#     checker_thread = threading.Thread(target=run_daily_checker, daemon=True)
+#     checker_thread.start()
+#     st.session_state.notification_checker_started = True
+
+print("⚠️ Daily notification checker disabled to prevent duplicates")
+def manually_check_notifications():
+    """Manual notification check - for HR/Admin use"""
+    st.title(" Manual Notification Check")
+    
+    user = st.session_state.user
+    if user['role'] not in ['HR', 'CMD', 'VP']:
+        st.warning(" Only HR/CMD/VP can run manual notification checks")
+        return
+    
+    st.info("This will check all active goals and send notifications for:")
+    st.markdown("""
+    - Goals due in 1-5 days
+    - Goals past deadline (not completed)
+    - Missing weekly updates
+    """)
+    
+    if st.button(" Run Notification Check", type="primary"):
+        with st.spinner("Checking all goals..."):
+            check_and_notify_due_dates_and_missing_updates()
+            st.success("✅ Notification check completed!")
+            st.info("Check the console/logs for details")
+    
+    st.markdown("---")
+    
+    # Show notification stats
+    st.subheader(" Notification Statistics")
+    
+    all_users = db.get_all_users()
+    total_notifs = 0
+    unread_notifs = 0
+    
+    for u in all_users:
+        user_notifs = get_user_notifications(u['id'], limit=1000)
+        total_notifs += len(user_notifs)
+        unread_notifs += len([n for n in user_notifs if not n.get('is_read')])
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Notifications", total_notifs)
+    with col2:
+        st.metric("Unread", unread_notifs)
+    with col3:
+        st.metric("Read", total_notifs - unread_notifs)
 # ============================================
 # SESSION PERSISTENCE
 # ============================================
@@ -2529,8 +2986,8 @@ def login_page():
     base64_img = get_base64_image("infopacee.jpg")
 
     st.markdown(f"""
-    <div style="display:flex; justify-content:center; align-items:center; width:100%; margin-top:10px;">
-        <img src="data:image/jpg;base64,{base64_img}" style="width:150px; height:150px;">
+    <div style="display:flex; justify-content:center; align-items:center; width:100%; margin-top:8px;">
+        <img src="data:image/jpg;base64,{base64_img}" style="width:100px; height:100px;">
     </div>
     """, unsafe_allow_html=True)
 
@@ -2605,7 +3062,7 @@ def login_page():
             st.info("Enter your email address and we'll send you a reset token.")
             
             with st.form("forgot_password_form"):
-                reset_email = st.text_input(" Email Address", placeholder="your@email.com")
+                reset_email = st.text_input("📧 Email Address", placeholder="your@email.com")
                 submit_reset = st.form_submit_button("Send Reset Token", use_container_width=True)
                 
                 if submit_reset:
@@ -2690,10 +3147,13 @@ def display_dashboard():
     """Display enhanced professional dashboard"""
     user = st.session_state.user
     role = user['role']
-    
+
     if not user:
         st.warning("⚠️ Session expired. Please login again.")
         st.rerun()
+    today = date.today()
+    current_year = today.year
+    current_month = today.month
 
     # ✅ INITIALIZE ALL VARIABLES AT THE START
     avg_progress = 0
@@ -2705,13 +3165,13 @@ def display_dashboard():
 
     # Welcome Header with gradient
     role_greetings = {
-        'CMD': ' Chairman and Managing Director ',
+        'CMD': ' Chief Managing Director',
         'VP': ' Vice President',
         'HR': ' Human Resources',
         'Manager': ' Manager',
         'Employee': ' Employee'
     }
-    
+
     st.markdown(f"""
     <div style="background: linear-gradient(135deg, #2DCCFF, #9BBCE0);
                 padding: 30px; border-radius: 15px; margin-bottom: 30px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
@@ -2721,34 +3181,116 @@ def display_dashboard():
         </p>
     </div>
     """, unsafe_allow_html=True)
-    
-    # Rest of dashboard remains similar but with role-based views...
-    # Add CMD/VP specific organization-wide metrics
-    
-    if role in ['CMD', 'VP','HR']:
-    
-        all_users = db.get_all_users()
-        total_cmd = len([u for u in all_users if u['role'] == 'CMD'])
-        total_vp = len([u for u in all_users if u['role'] == 'VP'])
-        total_hr = len([u for u in all_users if u['role'] == 'HR'])
-        total_managers = len([u for u in all_users if u['role'] == 'Manager'])
-        total_employees = len([u for u in all_users if u['role'] == 'Employee'])
-        
-        st.markdown("###  Your Performance Overview")
 
-        # Get all user goals
-        user_goals = db.get_user_all_goals(user['id'])
-        
-        # ✅ Calculate metrics FIRST (before using them in HTML)
-        total_goals = len(user_goals)
-        completed_goals = len([g for g in user_goals if g.get('status') == 'Completed'])
-        active_goals = len([g for g in user_goals if g.get('status') == 'Active'])
-        
+    # Custom CSS for metric card buttons
+    st.markdown("""
+    <style>
+    /* Style for metric card buttons */
+    div[data-testid="column"] button {
+        height: 120px !important;
+        padding: 20px !important;
+        font-size: 16px !important;
+        white-space: pre-line !important;
+        line-height: 1.4 !important;
+    }
+    
+    div[data-testid="column"] button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
+        transition: all 0.3s ease;
+    }
+    
+    div[data-testid="column"] button p {
+        font-size: 14px !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # Add CMD/VP/HR specific organization-wide metrics
+    if role in ['CMD', 'VP', 'HR']:
+        # ============================================
+        # ORGANIZATION PERFORMANCE OVERVIEW (MONTHLY)
+        # ============================================
+        st.markdown("### Organization Overview")
+
+        # Month/Year selector with current month default
+        today = date.today()
+        current_year = today.year
+        current_month = today.month
+
+        col_filter1, col_filter2, col_filter3 = st.columns([2, 2, 1])
+
+        with col_filter1:
+            # Team filter dropdown
+            all_users = db.get_all_users()
+            departments = list(set([normalize_department(u.get('department')) for u in all_users]))
+            departments = ['All Teams'] + sorted([d for d in departments if d and d != 'UNASSIGNED'])
+                    
+            selected_team = st.selectbox(
+                " Filter by Team",
+                departments,
+                key="team_filter_select"
+            )
+
+        with col_filter2:
+            # User filter dropdown
+            if selected_team == 'All Teams':
+                user_options = ['All Users'] + [f"{u['name']} ({u['role']}) - {u['email']}" for u in all_users]
+            else:
+                filtered_users = [u for u in all_users if u.get('department') == selected_team]
+                user_options = ['All Users'] + [f"{u['name']} ({u['role']}) - {u['email']}" for u in filtered_users]
+            
+            selected_user_option = st.selectbox(
+                "👤 Filter by User",
+                user_options,
+                key="user_filter_select"
+            )
+
+        with col_filter3:
+            selected_month = st.selectbox(
+                "📅 Month",
+                list(range(1, 13)),
+                index=current_month - 1,
+                format_func=lambda x: get_month_name(x),
+                key="org_month_select"
+            )
+
+        # Use current year only
+        selected_year = current_year
+
+        # Build filter display text
+        filter_parts = []
+        if selected_team != 'All Teams':
+            filter_parts.append(f"**{selected_team}**")
+        if selected_user_option != 'All Users':
+            user_name = selected_user_option.split(' (')[0]
+            filter_parts.append(f"**{user_name}**")
+
+        filter_text = " → ".join(filter_parts) if filter_parts else "**All Users**"
+        st.caption(f"Showing: {get_month_name(selected_month)} {selected_year} • {filter_text}")
+
+        # Get month goals (filtered by team and user)
+        month_goals = get_organization_month_goals(selected_month, selected_year)
+
+        # Apply team filter
+        if selected_team != 'All Teams':
+            month_goals = [g for g in month_goals if normalize_department(g.get('user_department')) == selected_team]
+
+        # Apply user filter
+        if selected_user_option != 'All Users':
+            user_email = selected_user_option.split(' - ')[1]
+            selected_user_obj = next(u for u in all_users if u['email'] == user_email)
+            month_goals = [g for g in month_goals if g['user_id'] == selected_user_obj['id']]
+
+        # Calculate metrics
+        total_goals = len(month_goals)
+        completed_goals = len([g for g in month_goals if g.get('status') == 'Completed'])
+        active_goals = len([g for g in month_goals if g.get('status') == 'Active'])
+
         # Calculate average progress
         total_progress = 0
         goals_with_progress = 0
-        
-        for goal in user_goals:
+        for goal in month_goals:
             monthly_achievement = goal.get('monthly_achievement')
             if monthly_achievement is not None:
                 monthly_target = goal.get('monthly_target', 1)
@@ -2756,164 +3298,1392 @@ def display_dashboard():
                     progress = (monthly_achievement / monthly_target * 100)
                     total_progress += progress
                     goals_with_progress += 1
-        
+
         avg_progress = (total_progress / goals_with_progress) if goals_with_progress > 0 else 0
-        completion_rate = (completed_goals / total_goals * 100) if total_goals > 0 else 0
-        
+
         # Count overdue goals
         overdue_goals = 0
-        today = date.today()
-        for goal in user_goals:
+        month_end = date(selected_year, selected_month, calendar.monthrange(selected_year, selected_month)[1])
+        for goal in month_goals:
             if goal.get('status') == 'Active':
                 end_date_str = goal.get('end_date')
                 if end_date_str:
                     try:
                         end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
-                        if today > end_date:
+                        if month_end > end_date:
                             overdue_goals += 1
                     except:
                         pass
-        
-        # NOW display the metrics (after all calculations are done)
+
+        # Display clickable metric cards
         col_perf1, col_perf2, col_perf3, col_perf4, col_perf5 = st.columns(5)
-        
+
         with col_perf1:
-            st.markdown(f"""
-            <div style="background: #FFFFFF; width: 100%; height: 160px;
-                    padding: 20px; border-radius: 10px; text-align: center; box-shadow:0 2px 4px rgba(0,0,0,0.08),0 0 18px rgba(59,130,246,0.25);display: flex; flex-direction: column; justify-content: center;">
-                <div style="font-size: 36px; margin-bottom: 10px;"></div>
-                <div style="font-size: 32px; font-weight: 700; color: #3B82F6; margin-bottom: 6px;">{total_goals}</div>
-                <div style="font-size: 13px; font-weight: 700; text-transform: uppercase; color: #3B82F6;
-                    padding: 4px 10px; border-radius: 6px; display: inline-block;">Total Goals</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col_perf2:
-            st.markdown(f"""
-            <div style="background:#FFF; width:100%; height:160px; padding:20px; border-radius:10px;
-                text-align:center; display:flex; flex-direction:column; justify-content:center;
-                box-shadow:0 2px 4px rgba(0,0,0,0.08), 0 0 18px rgba(16,185,129,0.22);">
-                <div style="font-size:32px; font-weight:700; color:#10B981; margin-bottom:6px;">
-                    {completed_goals}
-                </div>
-                <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#10B981;
-                     padding:4px 10px; border-radius:6px; display:inline-block;">
-                    Completed</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        
-        with col_perf3:
-            st.markdown(f"""
-            <div style="background:#FFF; width:100%; height:160px; padding:20px; border-radius:10px;
-                text-align:center; display:flex; flex-direction:column; justify-content:center;
-                box-shadow:0 2px 4px rgba(0,0,0,0.08), 0 0 18px rgba(245,87,108,0.23);">
-                <div style="font-size:32px; font-weight:700; color:#F5576C; margin-bottom:6px;">
-                    {active_goals}
-                </div>
-                <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#F5576C;
-                    padding:4px 10px; border-radius:6px; display:inline-block;">
-                    Active
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col_perf4:
-            st.markdown(f"""
-            <div style=" background:#FFF; width:100%; height:160px; padding:20px; border-radius:10px;
-                text-align:center; display:flex; flex-direction:column; justify-content:center;
-                box-shadow:0 2px 4px rgba(0,0,0,0.08), 0 0 18px rgba(0,201,255,0.23);">
-                <div style="font-size:32px; font-weight:700; color:#00C9FF; margin-bottom:6px;">
-                    {avg_progress:.1f}%
-                </div>
-                <div style="
-                    font-size:13px; font-weight:700; text-transform:uppercase; color:#00C9FF;
-                     padding:4px 10px; border-radius:6px; display:inline-block;">
-                    Avg Progress
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col_perf5:
-            overdue_color = "#EF4444" if overdue_goals > 0 else "#10B981"
-            label_bg = "#FEF2F2" if overdue_goals > 0 else "#ECFDF5"
-            glow = "rgba(239,68,68,0.23)" if overdue_goals > 0 else "rgba(16,185,129,0.23)"
-
-            st.markdown(f"""
-            <div style="background:#FFF; width:100%; height:160px; padding:20px; border-radius:10px;
-                text-align:center; display:flex; flex-direction:column; justify-content:center;
-                box-shadow:0 2px 4px rgba(0,0,0,0.08), 0 0 18px {glow};">
-                <div style="font-size:32px; font-weight:700; color:{overdue_color}; margin-bottom:6px;">
-                    {overdue_goals}
-                </div>
-                <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:{overdue_color};
-                     padding:4px 10px; border-radius:6px; display:inline-block;">Overdue
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        
-        st.markdown("---")
-        # Department-wise breakdown
-        col_left, col_right = st.columns([1, 1])
-        
-        with col_left:
-            st.markdown("####  Department Distribution")
-            dept_count = {}
-            for u in all_users:
-                dept = u.get('department', 'Unassigned')
-                dept_count[dept] = dept_count.get(dept, 0) + 1
-            
-            if dept_count:
-                fig_dept = px.pie(
-                    values=list(dept_count.values()),
-                    names=list(dept_count.keys()),
-                    title="Employees by Department",
-                    hole=0.4,
-                    color_discrete_sequence=px.colors.qualitative.Set3
-                )
-                fig_dept.update_traces(textposition='inside', textinfo='percent+label')
-                fig_dept.update_layout(height=350, showlegend=True)
-                st.plotly_chart(fig_dept, use_container_width=True)
-        
-        with col_right:
-            st.markdown("####  Goals Performance")
-            total_goals_org = sum([len(db.get_user_all_goals(u['id'])) for u in all_users])
-            completed_goals_org = sum([db.get_user_goal_stats(u['id']).get('completed_goals', 0) for u in all_users])
-            active_goals_org = sum([db.get_user_goal_stats(u['id']).get('active_goals', 0) for u in all_users])
-            
-            fig_goals = go.Figure(data=[
-                go.Bar(name='Total', x=['Goals'], y=[total_goals_org], marker_color='#3b82f6'),
-                go.Bar(name='Completed', x=['Goals'], y=[completed_goals_org], marker_color='#10b981'),
-                go.Bar(name='Active', x=['Goals'], y=[active_goals_org], marker_color='#f59e0b')
-            ])
-            fig_goals.update_layout(
-                title="Organization Goals Overview",
-                barmode='group',
-                height=350,
-                showlegend=True
+            metric_card(
+                value=total_goals,
+                label="Total Goals",
+                color="#3B82F6",
+                shadow_rgba="rgba(59,130,246,0.25)"
             )
-            st.plotly_chart(fig_goals, use_container_width=True)
-        
+
+        with col_perf2:
+            metric_card(
+                value=completed_goals,
+                label="Completed",
+                color="#10B981",
+                shadow_rgba="rgba(16,185,129,0.22)",
+            )
+
+        with col_perf3:
+            metric_card(
+                value=active_goals,
+                label="Active",
+                color="#F5576C",
+                shadow_rgba="rgba(245,87,108,0.23)",
+            )
+
+        with col_perf4:
+            metric_card(
+                value=f"{avg_progress:.1f}",
+                label="Avg Progress",
+                color="#00C9FF",
+                shadow_rgba="rgba(0,201,255,0.23)",
+                suffix="%"
+            )
+
+        with col_perf5:
+            is_overdue = overdue_goals > 0
+
+            metric_card(
+                value=overdue_goals,
+                label="Overdue",
+                color="#EF4444" if is_overdue else "#10B981",
+                shadow_rgba="rgba(239,68,68,0.23)" if is_overdue else "rgba(16,185,129,0.23)",
+                icon="" if is_overdue else "",
+                label_bg="#FEF2F2" if is_overdue else "#ECFDF5"
+            )
+
         st.markdown("---")
+        # ============================================
+        # DETAILS MODAL (when card is clicked)
+        # ============================================
+        if st.session_state.get('show_details') and st.session_state.get('show_details').startswith('org_'):
+            st.markdown("---")
+            detail_type = st.session_state.show_details
+            
+            col_header, col_close = st.columns([5, 1])
+            
+            with col_header:
+                if detail_type == 'org_total':
+                    st.subheader(f" All Goals ({len(month_goals)}) - {filter_text}")
+                elif detail_type == 'org_completed':
+                    st.subheader(f" Completed Goals ({completed_goals})")
+                elif detail_type == 'org_active':
+                    st.subheader(f" Active Goals ({active_goals})")
+                elif detail_type == 'org_progress':
+                    st.subheader(f" Progress Breakdown")
+                elif detail_type == 'org_overdue':
+                    st.subheader(f" Overdue Goals ({overdue_goals})")
+            
+            with col_close:
+                if st.button("✕ Close", key="close_org_details"):
+                    del st.session_state.show_details
+                    st.rerun()
+            
+            # Filter goals based on detail type
+            if detail_type == 'org_completed':
+                display_goals = [g for g in month_goals if g.get('status') == 'Completed']
+            elif detail_type == 'org_active':
+                display_goals = [g for g in month_goals if g.get('status') == 'Active']
+            elif detail_type == 'org_overdue':
+                display_goals = []
+                for goal in month_goals:
+                    if goal.get('status') == 'Active':
+                        end_date_str = goal.get('end_date')
+                        if end_date_str:
+                            try:
+                                end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                                if month_end > end_date:
+                                    display_goals.append(goal)
+                            except:
+                                pass
+            elif detail_type == 'org_progress':
+                display_goals = month_goals.copy()
+                for g in display_goals:
+                    achievement = g.get('monthly_achievement')
+                    target = g.get('monthly_target', 1)
+                    achievement_val = 0 if achievement is None else achievement
+                    target_val = 1 if target is None or target == 0 else target
+                    g['_progress'] = calculate_progress(achievement_val, target_val)
+                display_goals.sort(key=lambda x: x['_progress'], reverse=True)
+            else:
+                display_goals = month_goals
+            
+            # Display goals in table
+            if display_goals:
+                goal_data = []
+                for goal in display_goals:
+                    monthly_achievement = goal.get('monthly_achievement')
+                    monthly_target = goal.get('monthly_target', 1)
+                    achievement_value = 0 if monthly_achievement is None else monthly_achievement
+                    target_value = 1 if monthly_target is None or monthly_target == 0 else monthly_target
+                    progress = calculate_progress(achievement_value, target_value)
+                    
+                    goal_data.append({
+                        'Employee': goal['user_name'],
+                        'Role': goal['user_role'],
+                        'Department': goal['user_department'],
+                        'Goal Title': goal['goal_title'],
+                        'Month': get_month_name(goal.get('month', 1)),  # ADD THIS
+                        'Year': str(goal['year']),  # ADD THIS
+                        'Target': monthly_target if monthly_target is not None else 0,
+                        'Achievement': monthly_achievement if monthly_achievement is not None else '-',
+                        'Progress': f"{progress:.1f}%",
+                        'Status': goal.get('status', 'Active')
+                    })
+                
+                df_goals = pd.DataFrame(goal_data)
+                st.dataframe(df_goals, use_container_width=True, height=400)
+                
+                # Export button
+                st.download_button(
+                    "📥 Export to CSV",
+                    df_goals.to_csv(index=False).encode('utf-8'),
+                    f"org_goals_{detail_type}_{selected_month}_{selected_year}.csv",
+                    "text/csv",
+                    key='download_org_details'
+                )
+            else:
+                st.info("No goals found in this category")
+            
+            st.markdown("---")
+
         
-        # ✅ FIXED: Top Performers - Role-based display
+    
+        # ============================================
+        # TEAM PERFORMANCE (ROLE-SPECIFIC TEAMS)
+        # ============================================
+        if role == 'CMD':
+            
+            st.markdown("### 👥 My Team (VPs)")
+            
+            # Month selector for CMD's team
+            col_cmd_team_filter1, col_cmd_team_filter2 = st.columns([4, 1])
+            
+            with col_cmd_team_filter1:
+                st.caption("Filter VP team performance by month")
+            
+            with col_cmd_team_filter2:
+                cmd_team_month = st.selectbox(
+                    "Month",
+                    list(range(1, 13)),
+                    index=current_month - 1,
+                    format_func=lambda x: get_month_name(x),
+                    key="cmd_team_month_select"
+                )
+            
+            st.caption(f"**VP Team Performance: {get_month_name(cmd_team_month)} {current_year}**")
+            
+            # Get all VPs (CMD's team)
+            all_users = db.get_all_users()
+            vp_team = [u for u in all_users if u['role'] == 'VP']
+            
+            # Calculate VP team metrics for selected month
+            vp_team_total_goals = 0
+            vp_team_completed_goals = 0
+            vp_team_active_goals = 0
+            vp_team_total_progress = 0
+            vp_team_goals_count = 0
+            vp_team_overdue_goals = 0
+            
+            today_date = date.today()
+            
+            for vp in vp_team:
+                vp_month_goals = get_user_month_goals(vp['id'], cmd_team_month, current_year)
+                vp_team_total_goals += len(vp_month_goals)
+                vp_team_completed_goals += len([g for g in vp_month_goals if g.get('status') == 'Completed'])
+                vp_team_active_goals += len([g for g in vp_month_goals if g.get('status') == 'Active'])
+                
+                for goal in vp_month_goals:
+                    achievement = goal.get('monthly_achievement')
+                    if achievement is not None:
+                        target = goal.get('monthly_target', 1)
+                        if target > 0:
+                            progress = (achievement / target * 100)
+                            vp_team_total_progress += progress
+                            vp_team_goals_count += 1
+                    
+                    # Count overdue goals
+                    if goal.get('status') == 'Active':
+                        end_date_str = goal.get('end_date')
+                        if end_date_str:
+                            try:
+                                end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                                if today_date > end_date:
+                                    vp_team_overdue_goals += 1
+                            except:
+                                pass
+            
+            vp_team_avg_progress = (vp_team_total_progress / vp_team_goals_count) if vp_team_goals_count > 0 else 0
+            
+            col_cmd1, col_cmd2, col_cmd3, col_cmd4, col_cmd5 = st.columns(5)
+            
+            with col_cmd1:
+                st.markdown(
+                    f"""
+                    <div style="
+                        background:#FFFFFF;
+                        width:100%;
+                        height:160px;
+                        padding:20px;
+                        border-radius:10px;
+                        text-align:center;
+                        display:flex;
+                        flex-direction:column;
+                        justify-content:center;
+                        box-shadow:
+                            0 2px 4px rgba(0,0,0,0.08),
+                            0 0 18px rgba(118,75,162,0.23);
+                    ">
+                        <div style="font-size:36px; margin-bottom:10px;"></div>
+
+                        <div style="font-size:32px; font-weight:700; color:#764BA2; margin-bottom:6px;">
+                            {len(vp_team)}
+                        </div>
+
+                        <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#764BA2;
+                            padding:4px 10px; border-radius:6px; display:inline-block;">
+                            VPs
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            
+            with col_cmd2:
+                st.markdown(
+                    f"""
+                    <div style="
+                        background:#FFFFFF;
+                        width:100%;
+                        height:160px;
+                        padding:20px;
+                        border-radius:10px;
+                        text-align:center;
+                        display:flex;
+                        flex-direction:column;
+                        justify-content:center;
+                        box-shadow:
+                            0 2px 4px rgba(0,0,0,0.08),
+                            0 0 18px rgba(56,249,215,0.23);
+                    ">
+                        <div style="font-size:36px; margin-bottom:10px;"></div>
+
+                        <div style="font-size:32px; font-weight:700; color:#38F9D7; margin-bottom:6px;">
+                            {vp_team_total_goals}
+                        </div>
+
+                        <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#38F9D7;
+                            padding:4px 10px; border-radius:6px; display:inline-block;">
+                            VP Goals
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            
+            with col_cmd3:
+                st.markdown(
+                    f"""
+                    <div style="
+                        background:#FFFFFF;
+                        width:100%;
+                        height:160px;
+                        padding:20px;
+                        border-radius:10px;
+                        text-align:center;
+                        display:flex;
+                        flex-direction:column;
+                        justify-content:center;
+                        box-shadow:
+                            0 2px 4px rgba(0,0,0,0.08),
+                            0 0 18px rgba(245,87,108,0.23);
+                    ">
+                        <div style="font-size:36px; margin-bottom:10px;"></div>
+
+                        <div style="font-size:32px; font-weight:700; color:#F5576C; margin-bottom:6px;">
+                            {vp_team_completed_goals}
+                        </div>
+
+                        <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#F5576C;
+                            padding:4px 10px; border-radius:6px; display:inline-block;">
+                            Completed
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            
+            with col_cmd4:
+                st.markdown(
+                    f"""
+                    <div style="
+                        background:#FFFFFF;
+                        width:100%;
+                        height:160px;
+                        padding:20px;
+                        border-radius:10px;
+                        text-align:center;
+                        display:flex;
+                        flex-direction:column;
+                        justify-content:center;
+                        box-shadow:
+                            0 2px 4px rgba(0,0,0,0.08),
+                            0 0 18px rgba(245,158,11,0.23);
+                    ">
+                        <div style="font-size:36px; margin-bottom:10px;"></div>
+
+                        <div style="font-size:32px; font-weight:700; color:#F59E0B; margin-bottom:6px;">
+                            {vp_team_avg_progress:.1f}%
+                        </div>
+
+                        <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#F59E0B;
+                            padding:4px 10px; border-radius:6px; display:inline-block;">
+                            Avg Progress
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                        
+            with col_cmd5:
+                overdue_color = "#EF4444" if vp_team_overdue_goals > 0 else "#10B981"
+                label_bg = "#FEF2F2" if vp_team_overdue_goals > 0 else "#ECFDF5"
+                glow = "rgba(239,68,68,0.23)" if vp_team_overdue_goals > 0 else "rgba(16,185,129,0.23)"
+                icon = "" if vp_team_overdue_goals > 0 else ""
+
+                st.markdown(
+                    f"""
+                    <div style="
+                        background:#FFFFFF;
+                        width:100%;
+                        height:160px;
+                        padding:20px;
+                        border-radius:10px;
+                        text-align:center;
+                        display:flex;
+                        flex-direction:column;
+                        justify-content:center;
+                        box-shadow:
+                            0 2px 4px rgba(0,0,0,0.08),
+                            0 0 18px {glow};
+                    ">
+                        <div style="font-size:36px; margin-bottom:10px;">{icon}</div>
+
+                        <div style="font-size:32px; font-weight:700; color:{overdue_color}; margin-bottom:6px;">
+                            {vp_team_overdue_goals}
+                        </div>
+
+                        <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:{overdue_color};
+                            background:{label_bg}; padding:4px 10px; border-radius:6px; display:inline-block;">
+                            Overdue
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            st.markdown("---")
+            # CMD Team details modal
+            if st.session_state.get('show_details') and st.session_state.get('show_details').startswith('cmd_team_'):
+                st.markdown("---")
+                detail_type = st.session_state.show_details
+                
+                col_header, col_close = st.columns([5, 1])
+                
+                with col_header:
+                    if detail_type == 'cmd_team_members':
+                        st.subheader(f" VP Team Members ({len(vp_team)})")
+                    elif detail_type == 'cmd_team_goals':
+                        st.subheader(f" All VP Goals ({vp_team_total_goals}) - {get_month_name(cmd_team_month)} {current_year}")
+                    elif detail_type == 'cmd_team_completed':
+                        st.subheader(f" VP Completed Goals ({vp_team_completed_goals})")
+                    elif detail_type == 'cmd_team_progress':
+                        st.subheader(f" VP Progress Breakdown")
+                    elif detail_type == 'cmd_team_overdue':
+                        st.subheader(f" VP Overdue Goals ({vp_team_overdue_goals})")
+                
+                with col_close:
+                    if st.button("✕ Close", key="close_cmd_team_details"):
+                        del st.session_state.show_details
+                        st.rerun()
+                
+                # Show CMD team details
+                if detail_type == 'cmd_team_members':
+                    # Display VP members list
+                    members_data = []
+                    for vp in vp_team:
+                        vp_goals = get_user_month_goals(vp['id'], cmd_team_month, current_year)
+                        completed = len([g for g in vp_goals if g.get('status') == 'Completed'])
+                        
+                        # Count VP's overdue goals
+                        vp_overdue = 0
+                        for goal in vp_goals:
+                            if goal.get('status') == 'Active':
+                                end_date_str = goal.get('end_date')
+                                if end_date_str:
+                                    try:
+                                        end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                                        if today_date > end_date:
+                                            vp_overdue += 1
+                                    except:
+                                        pass
+                        
+                        members_data.append({
+                            'Name': vp['name'],
+                            'Email': vp['email'],
+                            'Department': vp.get('department', 'N/A'),
+                            'Total Goals': len(vp_goals),
+                            'Completed': completed,
+                            'Overdue': vp_overdue
+                        })
+                    
+                    df_members = pd.DataFrame(members_data)
+                    st.dataframe(df_members, use_container_width=True, height=400)
+                    
+                    st.download_button(
+                        "📥 Export to CSV",
+                        df_members.to_csv(index=False).encode('utf-8'),
+                        f"cmd_vp_team_{cmd_team_month}_{current_year}.csv",
+                        "text/csv",
+                        key='download_cmd_team_members'
+                    )
+                    
+                else:
+                    # Collect all VP team goals
+                    all_vp_team_goals = []
+                    for vp in vp_team:
+                        vp_goals = get_user_month_goals(vp['id'], cmd_team_month, current_year)
+                        for goal in vp_goals:
+                            goal['member_name'] = vp['name']
+                        all_vp_team_goals.extend(vp_goals)
+                    
+                    # Filter based on detail type
+                    if detail_type == 'cmd_team_completed':
+                        display_goals = [g for g in all_vp_team_goals if g.get('status') == 'Completed']
+                    elif detail_type == 'cmd_team_overdue':
+                        display_goals = []
+                        for goal in all_vp_team_goals:
+                            if goal.get('status') == 'Active':
+                                end_date_str = goal.get('end_date')
+                                if end_date_str:
+                                    try:
+                                        end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                                        if today_date > end_date:
+                                            display_goals.append(goal)
+                                    except:
+                                        pass
+                    elif detail_type == 'cmd_team_progress':
+                        display_goals = all_vp_team_goals.copy()
+                        for g in display_goals:
+                            achievement = g.get('monthly_achievement')
+                            target = g.get('monthly_target', 1)
+                            achievement_val = 0 if achievement is None else achievement
+                            target_val = 1 if target is None or target == 0 else target
+                            g['_progress'] = calculate_progress(achievement_val, target_val)
+                        display_goals.sort(key=lambda x: x['_progress'], reverse=True)
+                    else:
+                        display_goals = all_vp_team_goals
+                    
+                    if display_goals:
+                        goal_data = []
+                        for goal in display_goals:
+                            monthly_achievement = goal.get('monthly_achievement')
+                            monthly_target = goal.get('monthly_target', 1)
+                            achievement_value = 0 if monthly_achievement is None else monthly_achievement
+                            target_value = 1 if monthly_target is None or monthly_target == 0 else monthly_target
+                            progress = calculate_progress(achievement_value, target_value)
+                            
+                            goal_data.append({
+                                'VP': goal['member_name'],
+                                'Goal Title': goal['goal_title'],
+                                'Department': goal.get('department', 'N/A'),
+                                'Month': get_month_name(goal.get('month', 1)),  # ADD THIS
+                                'Year': str(goal['year']),  # ADD THIS
+                                'Target': monthly_target if monthly_target is not None else 0,
+                                'Achievement': monthly_achievement if monthly_achievement is not None else '-',
+                                'Progress': f"{progress:.1f}%",
+                                'Status': goal.get('status', 'Active')
+                            })
+                        
+                        df_goals = pd.DataFrame(goal_data)
+                        st.dataframe(df_goals, use_container_width=True, height=400)
+                        
+                        st.download_button(
+                            "📥 Export to CSV",
+                            df_goals.to_csv(index=False).encode('utf-8'),
+                            f"cmd_vp_goals_{detail_type}_{cmd_team_month}_{current_year}.csv",
+                            "text/csv",
+                            key='download_cmd_team_modal_details'
+                        )
+                    else:
+                        st.info("No goals found in this category")
+                
+                st.markdown("---")
+        elif role == 'VP':
+                
+                st.markdown("### My Team (HR & Managers)")
+                
+                # Month selector for VP's team
+                col_vp_team_filter1, col_vp_team_filter2 = st.columns([4, 1])
+                
+                with col_vp_team_filter1:
+                    st.caption("Filter team performance by month")
+                
+                with col_vp_team_filter2:
+                    vp_team_month = st.selectbox(
+                        "Month",
+                        list(range(1, 13)),
+                        index=current_month - 1,
+                        format_func=lambda x: get_month_name(x),
+                        key="vp_team_month_select"
+                    )
+                
+                st.caption(f"**Team Performance: {get_month_name(vp_team_month)} {current_year}**")
+                
+                # Get all HR and Managers (VP's team)
+                all_users = db.get_all_users()
+                vp_team = [u for u in all_users if u['role'] in ['HR', 'Manager']]
+                
+                # Calculate team metrics for selected month
+                vp_team_total_goals = 0
+                vp_team_completed_goals = 0
+                vp_team_active_goals = 0
+                vp_team_total_progress = 0
+                vp_team_goals_count = 0
+                vp_team_overdue_goals = 0
+                
+                today_date = date.today()
+                
+                for member in vp_team:
+                    member_month_goals = get_user_month_goals(member['id'], vp_team_month, current_year)
+                    vp_team_total_goals += len(member_month_goals)
+                    vp_team_completed_goals += len([g for g in member_month_goals if g.get('status') == 'Completed'])
+                    vp_team_active_goals += len([g for g in member_month_goals if g.get('status') == 'Active'])
+                    
+                    for goal in member_month_goals:
+                        achievement = goal.get('monthly_achievement')
+                        if achievement is not None:
+                            target = goal.get('monthly_target', 1)
+                            if target > 0:
+                                progress = (achievement / target * 100)
+                                vp_team_total_progress += progress
+                                vp_team_goals_count += 1
+                        
+                        # Count overdue goals
+                        if goal.get('status') == 'Active':
+                            end_date_str = goal.get('end_date')
+                            if end_date_str:
+                                try:
+                                    end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                                    if today_date > end_date:
+                                        vp_team_overdue_goals += 1
+                                except:
+                                    pass
+                
+                vp_team_avg_progress = (vp_team_total_progress / vp_team_goals_count) if vp_team_goals_count > 0 else 0
+                
+                col_vp1, col_vp2, col_vp3, col_vp4, col_vp5 = st.columns(5)
+                
+                # ================= VP TEAM METRICS =================
+
+# -------- col_vp1 : Team Members --------
+                with col_vp1:
+                    st.markdown(
+                        f"""
+                        <div style="
+                            background:#FFFFFF;
+                            width:100%;
+                            height:160px;
+                            padding:20px;
+                            border-radius:10px;
+                            text-align:center;
+                            display:flex;
+                            flex-direction:column;
+                            justify-content:center;
+                            box-shadow:
+                                0 2px 4px rgba(0,0,0,0.08),
+                                0 0 18px rgba(118,75,162,0.23);
+                        ">
+                            <div style="font-size:36px; margin-bottom:10px;"></div>
+                            <div style="font-size:32px; font-weight:700; color:#764BA2; margin-bottom:6px;">
+                                {len(vp_team)}
+                            </div>
+                            <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#764BA2;
+                                padding:4px 10px; border-radius:6px; display:inline-block;">
+                                Team Members
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+
+                # -------- col_vp2 : Team Goals --------
+                with col_vp2:
+                    st.markdown(
+                        f"""
+                        <div style="
+                            background:#FFFFFF;
+                            width:100%;
+                            height:160px;
+                            padding:20px;
+                            border-radius:10px;
+                            text-align:center;
+                            display:flex;
+                            flex-direction:column;
+                            justify-content:center;
+                            box-shadow:
+                                0 2px 4px rgba(0,0,0,0.08),
+                                0 0 18px rgba(56,249,215,0.23);
+                        ">
+                            <div style="font-size:36px; margin-bottom:10px;"></div>
+                            <div style="font-size:32px; font-weight:700; color:#38F9D7; margin-bottom:6px;">
+                                {vp_team_total_goals}
+                            </div>
+                            <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#38F9D7;
+                                padding:4px 10px; border-radius:6px; display:inline-block;">
+                                Team Goals
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+
+                # -------- col_vp3 : Completed --------
+                with col_vp3:
+                    st.markdown(
+                        f"""
+                        <div style="
+                            background:#FFFFFF;
+                            width:100%;
+                            height:160px;
+                            padding:20px;
+                            border-radius:10px;
+                            text-align:center;
+                            display:flex;
+                            flex-direction:column;
+                            justify-content:center;
+                            box-shadow:
+                                0 2px 4px rgba(0,0,0,0.08),
+                                0 0 18px rgba(245,87,108,0.23);
+                        ">
+                            <div style="font-size:36px; margin-bottom:10px;"></div>
+                            <div style="font-size:32px; font-weight:700; color:#F5576C; margin-bottom:6px;">
+                                {vp_team_completed_goals}
+                            </div>
+                            <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#F5576C;
+                                padding:4px 10px; border-radius:6px; display:inline-block;">
+                                Completed
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+
+                # -------- col_vp4 : Avg Progress --------
+                with col_vp4:
+                    st.markdown(
+                        f"""
+                        <div style="
+                            background:#FFFFFF;
+                            width:100%;
+                            height:160px;
+                            padding:20px;
+                            border-radius:10px;
+                            text-align:center;
+                            display:flex;
+                            flex-direction:column;
+                            justify-content:center;
+                            box-shadow:
+                                0 2px 4px rgba(0,0,0,0.08),
+                                0 0 18px rgba(245,158,11,0.23);
+                        ">
+                            <div style="font-size:36px; margin-bottom:10px;"></div>
+                            <div style="font-size:32px; font-weight:700; color:#F59E0B; margin-bottom:6px;">
+                                {vp_team_avg_progress:.1f}%
+                            </div>
+                            <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#F59E0B;
+                                padding:4px 10px; border-radius:6px; display:inline-block;">
+                                Avg Progress
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+
+                # -------- col_vp5 : Overdue (Conditional) --------
+                with col_vp5:
+                    overdue_color = "#EF4444" if vp_team_overdue_goals > 0 else "#10B981"
+                    label_bg = "#FEF2F2" if vp_team_overdue_goals > 0 else "#ECFDF5"
+                    glow = "rgba(239,68,68,0.23)" if vp_team_overdue_goals > 0 else "rgba(16,185,129,0.23)"
+                    icon = "" if vp_team_overdue_goals > 0 else ""
+
+                    st.markdown(
+                        f"""
+                        <div style="
+                            background:#FFFFFF;
+                            width:100%;
+                            height:160px;
+                            padding:20px;
+                            border-radius:10px;
+                            text-align:center;
+                            display:flex;
+                            flex-direction:column;
+                            justify-content:center;
+                            box-shadow:
+                                0 2px 4px rgba(0,0,0,0.08),
+                                0 0 18px {glow};
+                        ">
+                            <div style="font-size:36px; margin-bottom:10px;">{icon}</div>
+                            <div style="font-size:32px; font-weight:700; color:{overdue_color}; margin-bottom:6px;">
+                                {vp_team_overdue_goals}
+                            </div>
+                            <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:{overdue_color};
+                                background:{label_bg}; padding:4px 10px; border-radius:6px; display:inline-block;">
+                                Overdue
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+                st.markdown("---")
+                # VP Team details modal
+                if st.session_state.get('show_details') and st.session_state.get('show_details').startswith('vp_team_'):
+                    st.markdown("---")
+                    detail_type = st.session_state.show_details
+                    
+                    col_header, col_close = st.columns([5, 1])
+                    
+                    with col_header:
+                        if detail_type == 'vp_team_members':
+                            st.subheader(f" Team Members ({len(vp_team)})")
+                        elif detail_type == 'vp_team_goals':
+                            st.subheader(f" All Team Goals ({vp_team_total_goals}) - {get_month_name(vp_team_month)} {current_year}")
+                        elif detail_type == 'vp_team_completed':
+                            st.subheader(f" Team Completed Goals ({vp_team_completed_goals})")
+                        elif detail_type == 'vp_team_progress':
+                            st.subheader(f" Team Progress Breakdown")
+                        elif detail_type == 'vp_team_overdue':
+                            st.subheader(f" Team Overdue Goals ({vp_team_overdue_goals})")
+                    
+                    with col_close:
+                        if st.button("✕ Close", key="close_vp_team_details"):
+                            del st.session_state.show_details
+                            st.rerun()
+                    
+                    # Show VP team details
+                    if detail_type == 'vp_team_members':
+                        # Display team members list
+                        members_data = []
+                        for member in vp_team:
+                            member_goals = get_user_month_goals(member['id'], vp_team_month, current_year)
+                            completed = len([g for g in member_goals if g.get('status') == 'Completed'])
+                            
+                            # Count member's overdue goals
+                            member_overdue = 0
+                            for goal in member_goals:
+                                if goal.get('status') == 'Active':
+                                    end_date_str = goal.get('end_date')
+                                    if end_date_str:
+                                        try:
+                                            end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                                            if today_date > end_date:
+                                                member_overdue += 1
+                                        except:
+                                            pass
+                            
+                            members_data.append({
+                                'Name': member['name'],
+                                'Role': member['role'],
+                                'Email': member['email'],
+                                'Department': member.get('department', 'N/A'),
+                                'Total Goals': len(member_goals),
+                                'Completed': completed,
+                                'Overdue': member_overdue
+                            })
+                        
+                        df_members = pd.DataFrame(members_data)
+                        st.dataframe(df_members, use_container_width=True, height=400)
+                        
+                        st.download_button(
+                            "📥 Export to CSV",
+                            df_members.to_csv(index=False).encode('utf-8'),
+                            f"vp_team_{vp_team_month}_{current_year}.csv",
+                            "text/csv",
+                            key='download_vp_team_members'
+                        )
+                        
+                    else:
+                        # Collect all team goals
+                        all_vp_team_goals = []
+                        for member in vp_team:
+                            member_goals = get_user_month_goals(member['id'], vp_team_month, current_year)
+                            for goal in member_goals:
+                                goal['member_name'] = member['name']
+                                goal['member_role'] = member['role']
+                            all_vp_team_goals.extend(member_goals)
+                        
+                        # Filter based on detail type
+                        if detail_type == 'vp_team_completed':
+                            display_goals = [g for g in all_vp_team_goals if g.get('status') == 'Completed']
+                        elif detail_type == 'vp_team_overdue':
+                            display_goals = []
+                            for goal in all_vp_team_goals:
+                                if goal.get('status') == 'Active':
+                                    end_date_str = goal.get('end_date')
+                                    if end_date_str:
+                                        try:
+                                            end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                                            if today_date > end_date:
+                                                display_goals.append(goal)
+                                        except:
+                                            pass
+                        elif detail_type == 'vp_team_progress':
+                            display_goals = all_vp_team_goals.copy()
+                            for g in display_goals:
+                                achievement = g.get('monthly_achievement')
+                                target = g.get('monthly_target', 1)
+                                achievement_val = 0 if achievement is None else achievement
+                                target_val = 1 if target is None or target == 0 else target
+                                g['_progress'] = calculate_progress(achievement_val, target_val)
+                            display_goals.sort(key=lambda x: x['_progress'], reverse=True)
+                        else:
+                            display_goals = all_vp_team_goals
+                        
+                        if display_goals:
+                            goal_data = []
+                            for goal in display_goals:
+                                monthly_achievement = goal.get('monthly_achievement')
+                                monthly_target = goal.get('monthly_target', 1)
+                                achievement_value = 0 if monthly_achievement is None else monthly_achievement
+                                target_value = 1 if monthly_target is None or monthly_target == 0 else monthly_target
+                                progress = calculate_progress(achievement_value, target_value)
+                                
+                                goal_data.append({
+                                    'Member': goal['member_name'],
+                                    'Role': goal['member_role'],
+                                    'Goal Title': goal['goal_title'],
+                                    'Department': goal.get('department', 'N/A'),
+                                    'Month': get_month_name(goal.get('month', 1)),  # ADD THIS
+                                    'Year': str(goal['year']), # ADD THIS
+                                    'Target': monthly_target if monthly_target is not None else 0,
+                                    'Achievement': monthly_achievement if monthly_achievement is not None else '-',
+                                    'Progress': f"{progress:.1f}%",
+                                    'Status': goal.get('status', 'Active')
+                                })
+                            
+                            df_goals = pd.DataFrame(goal_data)
+                            st.dataframe(df_goals, use_container_width=True, height=400)
+                            
+                            st.download_button(
+                                "📥 Export to CSV",
+                                df_goals.to_csv(index=False).encode('utf-8'),
+                                f"vp_team_goals_{detail_type}_{vp_team_month}_{current_year}.csv",
+                                "text/csv",
+                                key='download_vp_team_modal_details'
+                            )
+                        else:
+                            st.info("No goals found in this category")
+                    
+                    st.markdown("---")
+        elif role == 'HR':
+            st.markdown("### 👥 HR Team Performance")
+            
+            # Get all HR members + employees with department='HR'
+            all_users = db.get_all_users()
+            hr_team = [u for u in all_users if u['role'] == 'HR' and u['id'] != user['id']]
+            
+            # ✅ NEW: Add employees with department='HR'
+            hr_dept_employees = [u for u in all_users if u['role'] == 'Employee' and normalize_department(u.get('department')) == 'HR']
+            
+            # Combine for display
+            all_hr = [user] + hr_team + hr_dept_employees
+            
+            if len(all_hr) > 1:  # More than just the current user
+                # Month selector
+                col_hr_filter1, col_hr_filter2 = st.columns([4, 1])
+                
+                with col_hr_filter1:
+                    st.caption("Filter HR team performance by month")
+                
+                with col_hr_filter2:
+                    hr_team_month = st.selectbox(
+                        "Month",
+                        list(range(1, 13)),
+                        index=current_month - 1,
+                        format_func=lambda x: get_month_name(x),
+                        key="hr_team_month_select"
+                    )
+                
+                st.caption(f"**HR Team Performance: {get_month_name(hr_team_month)} {current_year}**")
+                
+                # Calculate metrics including self and HR dept employees
+                hr_team_total_goals = 0
+                hr_team_completed_goals = 0
+                hr_team_active_goals = 0
+                hr_team_total_progress = 0
+                hr_team_goals_count = 0
+                hr_team_overdue_goals = 0
+                
+                today_date = date.today()
+                
+                for hr_member in all_hr:
+                    member_month_goals = get_user_month_goals(hr_member['id'], hr_team_month, current_year)
+                    hr_team_total_goals += len(member_month_goals)
+                    hr_team_completed_goals += len([g for g in member_month_goals if g.get('status') == 'Completed'])
+                    hr_team_active_goals += len([g for g in member_month_goals if g.get('status') == 'Active'])
+                    
+                    for goal in member_month_goals:
+                        achievement = goal.get('monthly_achievement')
+                        if achievement is not None:
+                            target = goal.get('monthly_target', 1)
+                            if target > 0:
+                                progress = (achievement / target * 100)
+                                hr_team_total_progress += progress
+                                hr_team_goals_count += 1
+                        
+                        # Count overdue
+                        if goal.get('status') == 'Active':
+                            end_date_str = goal.get('end_date')
+                            if end_date_str:
+                                try:
+                                    end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                                    if today_date > end_date:
+                                        hr_team_overdue_goals += 1
+                                except:
+                                    pass
+                
+                hr_team_avg_progress = (hr_team_total_progress / hr_team_goals_count) if hr_team_goals_count > 0 else 0
+                
+                # Display metrics
+                col_hr1, col_hr2, col_hr3, col_hr4, col_hr5 = st.columns(5)
+                
+                # ================= HR TEAM METRICS =================
+
+# -------- col_hr1 : HR Team Members --------
+                with col_hr1:
+                    st.markdown(
+                        f"""
+                        <div style="
+                            background:#FFFFFF;
+                            width:100%;
+                            height:160px;
+                            padding:20px;
+                            border-radius:10px;
+                            text-align:center;
+                            display:flex;
+                            flex-direction:column;
+                            justify-content:center;
+                            box-shadow:
+                                0 2px 4px rgba(0,0,0,0.08),
+                                0 0 18px rgba(118,75,162,0.23);
+                        ">
+                            <div style="font-size:36px; margin-bottom:10px;"></div>
+                            <div style="font-size:32px; font-weight:700; color:#764BA2; margin-bottom:6px;">
+                                {len(all_hr)}
+                            </div>
+                            <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#764BA2;
+                                padding:4px 10px; border-radius:6px; display:inline-block;">
+                                HR Team Members
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+
+                # -------- col_hr2 : Team Goals --------
+                with col_hr2:
+                    st.markdown(
+                        f"""
+                        <div style="
+                            background:#FFFFFF;
+                            width:100%;
+                            height:160px;
+                            padding:20px;
+                            border-radius:10px;
+                            text-align:center;
+                            display:flex;
+                            flex-direction:column;
+                            justify-content:center;
+                            box-shadow:
+                                0 2px 4px rgba(0,0,0,0.08),
+                                0 0 18px rgba(56,249,215,0.23);
+                        ">
+                            <div style="font-size:36px; margin-bottom:10px;"></div>
+                            <div style="font-size:32px; font-weight:700; color:#179eaf; margin-bottom:6px;">
+                                {hr_team_total_goals}
+                            </div>
+                            <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#179eaf;
+                                padding:4px 10px; border-radius:6px; display:inline-block;">
+                                Team Goals
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+
+                # -------- col_hr3 : Completed --------
+                with col_hr3:
+                    st.markdown(
+                        f"""
+                        <div style="
+                            background:#FFFFFF;
+                            width:100%;
+                            height:160px;
+                            padding:20px;
+                            border-radius:10px;
+                            text-align:center;
+                            display:flex;
+                            flex-direction:column;
+                            justify-content:center;
+                            box-shadow:
+                                0 2px 4px rgba(0,0,0,0.08),
+                                0 0 18px rgba(245,87,108,0.23);
+                        ">
+                            <div style="font-size:36px; margin-bottom:10px;"></div>
+                            <div style="font-size:32px; font-weight:700; color:#F5576C; margin-bottom:6px;">
+                                {hr_team_completed_goals}
+                            </div>
+                            <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#F5576C;
+                                padding:4px 10px; border-radius:6px; display:inline-block;">
+                                Completed
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+
+                # -------- col_hr4 : Avg Progress --------
+                with col_hr4:
+                    st.markdown(
+                        f"""
+                        <div style="
+                            background:#FFFFFF;
+                            width:100%;
+                            height:160px;
+                            padding:20px;
+                            border-radius:10px;
+                            text-align:center;
+                            display:flex;
+                            flex-direction:column;
+                            justify-content:center;
+                            box-shadow:
+                                0 2px 4px rgba(0,0,0,0.08),
+                                0 0 18px rgba(245,158,11,0.23);
+                        ">
+                            <div style="font-size:36px; margin-bottom:10px;"></div>
+                            <div style="font-size:32px; font-weight:700; color:#F59E0B; margin-bottom:6px;">
+                                {hr_team_avg_progress:.1f}%
+                            </div>
+                            <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#F59E0B;
+                                padding:4px 10px; border-radius:6px; display:inline-block;">
+                                Avg Progress
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+
+                # -------- col_hr5 : Overdue (Conditional) --------
+                with col_hr5:
+                    overdue_color = "#EF4444" if hr_team_overdue_goals > 0 else "#10B981"
+                    label_bg = "#FEF2F2" if hr_team_overdue_goals > 0 else "#ECFDF5"
+                    glow = "rgba(239,68,68,0.23)" if hr_team_overdue_goals > 0 else "rgba(16,185,129,0.23)"
+                    icon = "" if hr_team_overdue_goals > 0 else ""
+
+                    st.markdown(
+                        f"""
+                        <div style="
+                            background:#FFFFFF;
+                            width:100%;
+                            height:160px;
+                            padding:20px;
+                            border-radius:10px;
+                            text-align:center;
+                            display:flex;
+                            flex-direction:column;
+                            justify-content:center;
+                            box-shadow:
+                                0 2px 4px rgba(0,0,0,0.08),
+                                0 0 18px {glow};
+                        ">
+                            <div style="font-size:36px; margin-bottom:10px;">{icon}</div>
+                            <div style="font-size:32px; font-weight:700; color:{overdue_color}; margin-bottom:6px;">
+                                {hr_team_overdue_goals}
+                            </div>
+                            <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:{overdue_color};
+                                background:{label_bg}; padding:4px 10px; border-radius:6px; display:inline-block;">
+                                Overdue
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+                
+                st.markdown("---")
+            else:
+                st.info(" You are the only HR member in the system.")           
+                  
+            # HR Team details modal
+            if st.session_state.get('show_details') and st.session_state.get('show_details').startswith('hr_team_'):
+                st.markdown("---")
+                detail_type = st.session_state.show_details
+                
+                col_header, col_close = st.columns([5, 1])
+                
+                with col_header:
+                    if detail_type == 'hr_team_members':
+                        st.subheader(f" HR Team Members ({len(all_hr)})")
+                    elif detail_type == 'hr_team_goals':
+                        st.subheader(f" All HR Goals ({hr_team_total_goals})")
+                    elif detail_type == 'hr_team_completed':
+                        st.subheader(f" HR Completed Goals ({hr_team_completed_goals})")
+                    elif detail_type == 'hr_team_progress':
+                        st.subheader(f" HR Progress Breakdown")
+                    elif detail_type == 'hr_team_overdue':
+                        st.subheader(f" HR Overdue Goals ({hr_team_overdue_goals})")
+                
+                with col_close:
+                    if st.button("✕ Close", key="close_hr_team_details"):
+                        del st.session_state.show_details
+                        st.rerun()
+                
+
+
+        # ✅ UPDATED: Organization Goals Distribution with Filters
+        st.markdown("####  Organization Goals Distribution")
+
+        # ===== STEP 1: ADD FILTERS (WITH USER FILTER) =====
+        col_filter1, col_filter2, col_filter3 = st.columns(3)  # Changed to 3 columns
+
+        with col_filter1:
+            # Get unique departments
+            all_depts = list(set([normalize_department(u.get('department')) for u in all_users]))
+            departments = ['All Teams'] + sorted([d for d in all_depts if d and d != 'UNASSIGNED'])
+            
+            selected_team = st.selectbox(
+                " Filter by Team",
+                departments,
+                key="org_goals_team_filter"
+            )
+
+        with col_filter2:
+            # Filter users based on selected team
+            if selected_team == 'All Teams':
+                filtered_users_for_dropdown = all_users
+            else:
+                filtered_users_for_dropdown = [u for u in all_users if normalize_department(u.get('department')) == selected_team]
+            
+            user_options = ['All Users'] + [f"{u['name']} ({u['role']})" for u in filtered_users_for_dropdown]
+            
+            selected_user_option = st.selectbox(
+                "👤 Filter by User",
+                user_options,
+                key="org_goals_user_filter"
+            )
+
+        with col_filter3:
+            filter_month = st.selectbox(
+                "📅 Filter by Month",
+                ["All Months"] + [get_month_name(i) for i in range(1, 13)],
+                key="org_goals_month_filter"
+            )
+
+        # Display filter status
+        filter_display = []
+        if selected_team != "All Teams":
+            filter_display.append(f"**{selected_team}**")
+        if selected_user_option != "All Users":
+            user_name = selected_user_option.split(' (')[0]
+            filter_display.append(f"**{user_name}**")
+        if filter_month != "All Months":
+            filter_display.append(f"**{filter_month}**")
+
+        if filter_display:
+            st.caption(f"Showing: {' | '.join(filter_display)}")
+        else:
+            st.caption("Showing: **All Goals**")
+
+        st.markdown("---")
+
+        # ===== STEP 2: CALCULATE FILTERED GOALS (WITH USER FILTER) =====
+        org_total_goals = 0
+        org_completed_goals = 0
+        org_active_goals = 0
+        org_overdue_goals = 0
+
+        today_date = date.today()
+        current_year = today_date.year
+
+        # Get selected user ID if filtering by user
+        selected_user_id = None
+        if selected_user_option != 'All Users':
+            selected_user_name = selected_user_option.split(' (')[0]
+            selected_user_obj = next((u for u in all_users if u['name'] == selected_user_name), None)
+            if selected_user_obj:
+                selected_user_id = selected_user_obj['id']
+
+        for u in all_users:
+            # Apply team filter at user level first
+            if selected_team != 'All Teams':
+                if normalize_department(u.get('department')) != selected_team:
+                    continue  # Skip this user entirely if not in selected team
+            
+            # Apply user filter
+            if selected_user_id is not None:
+                if u['id'] != selected_user_id:
+                    continue  # Skip this user if not the selected user
+            
+            user_goals = db.get_user_all_goals(u['id'])
+            
+            for goal in user_goals:
+                # Apply month filter
+                if filter_month != 'All Months':
+                    month_num = [get_month_name(i) for i in range(1, 13)].index(filter_month) + 1
+                    if goal.get('month') != month_num or goal.get('year') != current_year:
+                        continue
+                
+                org_total_goals += 1
+                
+                if goal.get('status') == 'Completed':
+                    org_completed_goals += 1
+                elif goal.get('status') == 'Active':
+                    org_active_goals += 1
+                    
+                    # Check if overdue
+                    end_date_str = goal.get('end_date')
+                    if end_date_str:
+                        try:
+                            end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                            if today_date > end_date:
+                                org_overdue_goals += 1
+                        except:
+                            pass
+
+        # ===== STEP 3: DISPLAY CHARTS WITH NEW LAYOUT =====
+        if org_total_goals > 0:
+            col_pie1, col_pie2 = st.columns([2, 1])  # Changed ratio: bigger chart, smaller summary
+            
+            with col_pie1:
+                # Goals by status (excluding overdue count from active)
+                org_on_track_active = org_active_goals - org_overdue_goals
+                
+                pie_data = {
+                    'Status': ['Completed', 'Active (On Track)', 'Overdue', 'Other'],
+                    'Count': [
+                        org_completed_goals,
+                        org_on_track_active,
+                        org_overdue_goals,
+                        org_total_goals - org_completed_goals - org_active_goals
+                    ]
+                }
+                
+                # Remove categories with 0 count
+                pie_df = pd.DataFrame(pie_data)
+                pie_df = pie_df[pie_df['Count'] > 0]
+                
+                fig_pie = px.pie(
+                    pie_df,
+                    values='Count',
+                    names='Status',
+                    title='Goals by Status',
+                    color='Status',
+                    color_discrete_map={
+                        'Completed': '#10b981',
+                        'Active (On Track)': '#3b82f6',
+                        'Overdue': '#ef4444',
+                        'Other': '#94a3b8'
+                    },
+                    hole=0.4  # Makes it a donut chart
+                )
+                fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+                fig_pie.update_layout(height=450)  # Increased from 350 for bigger chart
+                st.plotly_chart(fig_pie, use_container_width=True)
+            
+            # ===== STEP 4: COMPACT SUMMARY =====
+            with col_pie2:
+                st.markdown("##### Summary")
+                
+                # Compact metrics with custom styling
+                st.markdown(f"""
+                <div style='background: #f0f9ff; padding: 15px; border-radius: 8px; margin-bottom: 10px;'>
+                    <p style='margin: 0; font-size: 14px; color: #64748b;'>Total Goals</p>
+                    <h2 style='margin: 5px 0; color: #1e40af;'>{org_total_goals}</h2>
+                </div>
+                
+                <div style='background: #d1fae5; padding: 10px; border-radius: 8px; margin-bottom: 8px;'>
+                    <p style='margin: 0; font-size: 12px; color: #065f46;'>Completed</p>
+                    <p style='margin: 5px 0; font-size: 18px; font-weight: bold; color: #059669;'>
+                        {org_completed_goals} ({org_completed_goals/org_total_goals*100:.1f}%)
+                    </p>
+                </div>
+                
+                <div style='background: #dbeafe; padding: 10px; border-radius: 8px; margin-bottom: 8px;'>
+                    <p style='margin: 0; font-size: 12px; color: #1e40af;'>Active</p>
+                    <p style='margin: 5px 0; font-size: 18px; font-weight: bold; color: #2563eb;'>
+                        {org_active_goals} ({org_active_goals/org_total_goals*100:.1f}%)
+                    </p>
+                </div>
+                
+                <div style='background: #fee2e2; padding: 10px; border-radius: 8px; margin-bottom: 10px;'>
+                    <p style='margin: 0; font-size: 12px; color: #991b1b;'>Overdue</p>
+                    <p style='margin: 5px 0; font-size: 18px; font-weight: bold; color: #dc2626;'>
+                        {org_overdue_goals} ({org_overdue_goals/org_total_goals*100:.1f}%)
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Compact completion rate
+                completion_rate = (org_completed_goals / org_total_goals * 100) if org_total_goals > 0 else 0
+                st.markdown("**Completion Rate:**")
+                st.progress(completion_rate / 100)
+                st.caption(f"{completion_rate:.1f}%")
+        else:
+            st.info("No organization goals found matching the selected filters")
+
+        st.markdown("---")       
+                
+
+            
+
+        # ✅ Top Performers - Role-based display
         st.markdown("####  Top Performers (This Month)")
         rankings = []
-        
-        # Determine which employees to rank based on role
+
         if role == 'Manager':
-            # Manager sees only their team members
             team_members = db.get_team_members(user['id'])
             employees_to_rank = [m for m in team_members if m['role'] == 'Employee']
-            top_count = 3  # Show top 3 for managers
+            top_count = 3
             performer_scope = "Team"
         else:
-            # CMD, VP, HR see all employees in organization
             employees_to_rank = [u for u in all_users if u['role'] == 'Employee']
-            top_count = 5  # Show top 5 for CMD/VP/HR
+            top_count = 5
             performer_scope = "Organization"
-        
+
         for emp in employees_to_rank:
             emp_stats = db.get_user_goal_stats(emp['id'])
             if emp_stats.get('total_goals', 0) > 0:
@@ -2926,36 +4696,48 @@ def display_dashboard():
                     'Progress %': f"{emp_stats.get('avg_progress', 0):.1f}%",
                     'Progress_Val': emp_stats.get('avg_progress', 0)
                 })
-        
+
         if rankings:
             df_rank = pd.DataFrame(rankings)
             df_rank = df_rank.sort_values('Progress_Val', ascending=False).head(top_count)
             df_rank = df_rank.drop('Progress_Val', axis=1)
             df_rank.insert(0, 'Rank', range(1, len(df_rank) + 1))
-            df_rank = df_rank.reset_index(drop=True)
-            
-            # Show context-aware caption
+
             st.caption(f" Showing Top {min(len(df_rank), top_count)} of {len(rankings)} {performer_scope} Performers")
-            st.dataframe(df_rank, use_container_width=True, height=300, hide_index=True)
+            st.dataframe(df_rank, use_container_width=True, height=300)
         else:
             st.info(f"No performance data available for {performer_scope.lower()}")
-            
+
     elif role == 'Manager':
-        # Personal Performance Metrics
+    # Personal + Team view for Manager
         st.markdown("###  Your Performance Overview")
-        
-        # Get all user goals
-        user_goals = db.get_user_all_goals(user['id'])
-        
-        # ✅ Calculate metrics (Managers see all their goals - no approval needed)
+
+        # Month selector for manager's personal performance
+        col_mgr_filter1, col_mgr_filter2 = st.columns([4, 1])
+
+        with col_mgr_filter1:
+            st.caption("Filter your personal goals by month")
+
+        with col_mgr_filter2:
+            mgr_selected_month = st.selectbox(
+                "Month",
+                list(range(1, 13)),
+                index=current_month - 1,
+                format_func=lambda x: get_month_name(x),
+                key="mgr_month_select"
+            )
+
+        st.caption(f"**Your Performance: {get_month_name(mgr_selected_month)} {current_year}**")
+
+        # Get user goals for selected month ONLY
+        user_goals = get_user_month_goals(user['id'], mgr_selected_month, current_year)
+
         total_goals = len(user_goals)
         completed_goals = len([g for g in user_goals if g.get('status') == 'Completed'])
         active_goals = len([g for g in user_goals if g.get('status') == 'Active'])
-        
-        # Calculate average progress
+
         total_progress = 0
         goals_with_progress = 0
-        
         for goal in user_goals:
             monthly_achievement = goal.get('monthly_achievement')
             if monthly_achievement is not None:
@@ -2964,175 +4746,645 @@ def display_dashboard():
                     progress = (monthly_achievement / monthly_target * 100)
                     total_progress += progress
                     goals_with_progress += 1
-        
+
         avg_progress = (total_progress / goals_with_progress) if goals_with_progress > 0 else 0
-        
-        # Count overdue goals
+
         overdue_goals = 0
-        today = date.today()
+        today_date = date.today()
         for goal in user_goals:
             if goal.get('status') == 'Active':
                 end_date_str = goal.get('end_date')
                 if end_date_str:
                     try:
                         end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
-                        if today > end_date:
+                        if today_date > end_date:
                             overdue_goals += 1
                     except:
                         pass
-        
+
         col_perf1, col_perf2, col_perf3, col_perf4, col_perf5 = st.columns(5)
-        
-        # ===========================
-# CLEAN PASTEL METRIC CARDS
-# ===========================
 
+        # ================= MANAGER PERSONAL METRICS =================
+
+# -------- col_perf1 : Total Goals --------
         with col_perf1:
-            st.markdown(f"""
-            <div style="background:#FFF; width:100%; height:160px; padding:20px; border-radius:10px;
-                text-align:center; display:flex; flex-direction:column; justify-content:center;
-                box-shadow:0 2px 4px rgba(0,0,0,0.08),0 0 18px rgba(59,130,246,0.25);">
-                <div style="font-size:32px; font-weight:700; color:#3B82F6; margin-bottom:6px;">
-                    {total_goals}
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px rgba(59,130,246,0.25);
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;"></div>
+                    <div style="font-size:32px; font-weight:700; color:#3B82F6; margin-bottom:6px;">
+                        {total_goals}
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#3B82F6;
+                        padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Total Goals
+                    </div>
                 </div>
-                <div style="font-size:13px; font-weight:700; text-transform:uppercase;
-                    color:#3B82F6;padding:4px 10px; border-radius:6px; display:inline-block;">Total Goals
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """,
+                unsafe_allow_html=True
+            )
 
+
+        # -------- col_perf2 : Completed --------
         with col_perf2:
-            st.markdown(f"""
-            <div style="background:#FFF; width:100%; height:160px; padding:20px; border-radius:10px;
-                text-align:center; display:flex; flex-direction:column; justify-content:center;
-                box-shadow:0 2px 4px rgba(0,0,0,0.08),0 0 18px rgba(16,185,129,0.22);">
-                <div style="font-size:32px; font-weight:700; color:#10B981; margin-bottom:6px;">
-                    {completed_goals}
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px rgba(16,185,129,0.22);
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;"></div>
+                    <div style="font-size:32px; font-weight:700; color:#10B981; margin-bottom:6px;">
+                        {completed_goals}
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#10B981;
+                        padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Completed
+                    </div>
                 </div>
-                <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#10B981; padding:4px 10px; border-radius:6px; display:inline-block;"> Completed
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """,
+                unsafe_allow_html=True
+            )
 
+
+        # -------- col_perf3 : Active --------
         with col_perf3:
-            st.markdown(f"""
-            <div style="background:#FFF; width:100%; height:160px; padding:20px; border-radius:10px;
-                text-align:center; display:flex; flex-direction:column; justify-content:center;
-                box-shadow:0 2px 4px rgba(0,0,0,0.08),0 0 18px rgba(245,87,108,0.23);">
-                <div style="font-size:32px; font-weight:700; color:#F5576C; margin-bottom:6px;">
-                    {active_goals}
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px rgba(245,87,108,0.23);
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;"></div>
+                    <div style="font-size:32px; font-weight:700; color:#F5576C; margin-bottom:6px;">
+                        {active_goals}
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#F5576C;
+                        padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Active
+                    </div>
                 </div>
-                <div style="font-size:13px; font-weight:700; text-transform:uppercase;
-                    color:#F5576C;padding:4px 10px; border-radius:6px; display:inline-block;">Active
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """,
+                unsafe_allow_html=True
+            )
 
 
+        # -------- col_perf4 : Avg Progress --------
         with col_perf4:
-            st.markdown(f"""
-            <div style="background:#FFF; width:100%; height:160px; padding:20px; border-radius:10px;
-                text-align:center; display:flex; flex-direction:column; justify-content:center;
-                box-shadow:0 2px 4px rgba(0,0,0,0.08),0 0 18px rgba(0,201,255,0.23);">
-                <div style="font-size:32px; font-weight:700; color:#00C9FF; margin-bottom:6px;">
-                    {avg_progress:.1f}%
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px rgba(0,201,255,0.23);
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;"></div>
+                    <div style="font-size:32px; font-weight:700; color:#00C9FF; margin-bottom:6px;">
+                        {avg_progress:.1f}%
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#00C9FF;
+                        padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Avg Progress
+                    </div>
                 </div>
-                <div style="font-size:13px; font-weight:700; text-transform:uppercase;color:#00C9FF;
-                    padding:4px 10px; border-radius:6px; display:inline-block;">Avg Progress
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """,
+                unsafe_allow_html=True
+            )
 
+
+        # -------- col_perf5 : Overdue (Conditional) --------
         with col_perf5:
             overdue_color = "#EF4444" if overdue_goals > 0 else "#10B981"
             label_bg = "#FEF2F2" if overdue_goals > 0 else "#ECFDF5"
             glow = "rgba(239,68,68,0.23)" if overdue_goals > 0 else "rgba(16,185,129,0.23)"
+            icon = "" if overdue_goals > 0 else ""
 
-            st.markdown(f"""
-            <div style="background:#FFF; width:100%; height:160px; padding:20px; border-radius:10px;
-                text-align:center; display:flex; flex-direction:column; justify-content:center;
-                box-shadow:0 2px 4px rgba(0,0,0,0.08),0 0 18px {glow};">
-                <div style="font-size:32px; font-weight:700; color:{overdue_color}; margin-bottom:6px;">
-                    {overdue_goals}
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px {glow};
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;">{icon}</div>
+                    <div style="font-size:32px; font-weight:700; color:{overdue_color}; margin-bottom:6px;">
+                        {overdue_goals}
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:{overdue_color};
+                        background:{label_bg}; padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Overdue
+                    </div>
                 </div>
-                <div style="font-size:13px; font-weight:700; text-transform:uppercase;
-                    color:{overdue_color};padding:4px 10px; border-radius:6px; display:inline-block;">Overdue
-                </div>
-            </div>
-            """, unsafe_allow_html=True)        
+                """,
+                unsafe_allow_html=True
+            )
+
+
+        # Manager personal details modal
+        if st.session_state.get('show_details') and st.session_state.get('show_details').startswith('mgr_personal_'):
+            st.markdown("---")
+            detail_type = st.session_state.show_details
+            
+            col_header, col_close = st.columns([5, 1])
+            
+            with col_header:
+                if detail_type == 'mgr_personal_total':
+                    st.subheader(f" Your Goals ({total_goals}) - {get_month_name(mgr_selected_month)} {current_year}")
+                elif detail_type == 'mgr_personal_completed':
+                    st.subheader(f" Your Completed Goals ({completed_goals})")
+                elif detail_type == 'mgr_personal_active':
+                    st.subheader(f" Your Active Goals ({active_goals})")
+                elif detail_type == 'mgr_personal_progress':
+                    st.subheader(f" Your Progress Breakdown")
+                elif detail_type == 'mgr_personal_overdue':
+                    st.subheader(f" Your Overdue Goals ({overdue_goals})")
+            
+            with col_close:
+                if st.button("✕ Close", key="close_mgr_personal_details"):
+                    del st.session_state.show_details
+                    st.rerun()
+            
+            # Filter goals
+            if detail_type == 'mgr_personal_completed':
+                display_goals = [g for g in user_goals if g.get('status') == 'Completed']
+            elif detail_type == 'mgr_personal_active':
+                display_goals = [g for g in user_goals if g.get('status') == 'Active']
+            elif detail_type == 'mgr_personal_overdue':
+                display_goals = []
+                for goal in user_goals:
+                    if goal.get('status') == 'Active':
+                        end_date_str = goal.get('end_date')
+                        if end_date_str:
+                            try:
+                                end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                                if today_date > end_date:
+                                    display_goals.append(goal)
+                            except:
+                                pass
+            elif detail_type == 'mgr_personal_progress':
+                display_goals = user_goals.copy()
+                for g in display_goals:
+                    achievement = g.get('monthly_achievement')
+                    target = g.get('monthly_target', 1)
+                    achievement_val = 0 if achievement is None else achievement
+                    target_val = 1 if target is None or target == 0 else target
+                    g['_progress'] = calculate_progress(achievement_val, target_val)
+                display_goals.sort(key=lambda x: x['_progress'], reverse=True)
+            else:
+                display_goals = user_goals
+            
+            # Display goals table
+            if display_goals:
+                goal_data = []
+                for goal in display_goals:
+                    monthly_achievement = goal.get('monthly_achievement')
+                    monthly_target = goal.get('monthly_target', 1)
+                    achievement_value = 0 if monthly_achievement is None else monthly_achievement
+                    target_value = 1 if monthly_target is None or monthly_target == 0 else monthly_target
+                    progress = calculate_progress(achievement_value, target_value)
+                    
+                    goal_data.append({
+                        'Goal Title': goal['goal_title'],
+                        'Department': goal.get('department', 'N/A'),
+                        'KPI': goal.get('kpi', 'N/A'),
+                        'Month': get_month_name(goal.get('month', 1)),  # ADD THIS
+                        'Year': str(goal['year']),  # ADD THIS
+                        'Target': monthly_target if monthly_target is not None else 0,
+                        'Achievement': monthly_achievement if monthly_achievement is not None else '-',
+                        'Progress': f"{progress:.1f}%",
+                        'Status': goal.get('status', 'Active')
+                    })
+                
+                df_goals = pd.DataFrame(goal_data)
+                st.dataframe(df_goals, use_container_width=True, height=400)
+                
+                st.download_button(
+                    "📥 Export to CSV",
+                    df_goals.to_csv(index=False).encode('utf-8'),
+                    f"mgr_personal_goals_{detail_type}_{mgr_selected_month}_{current_year}.csv",
+                    "text/csv",
+                    key='download_mgr_personal_modal_details'
+                )
+            else:
+                st.info("No goals found in this category")
+            
+            st.markdown("---")
+
         st.markdown("---")
-        
+
         # Team Overview
         team_members = db.get_team_members(user['id'])
-        
         st.markdown("###  Team Overview")
-        
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.markdown(f"""
-            <div style="background:#FFF; width:100%; height:160px; padding:20px; border-radius:10px;
-                text-align:center; display:flex; flex-direction:column; justify-content:center;
-                box-shadow:0 2px 4px rgba(0,0,0,0.08), 0 0 18px rgba(118,75,162,0.23);">
-                <div style="font-size:28px; font-weight:700; color:#764BA2; margin-bottom:6px;">
-                    {len(team_members)}
-                </div>
-                <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#764BA2;
-                    padding:4px 10px; border-radius:6px; display:inline-block;">Team Members
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
 
-        with col2:
-            team_goals = sum([len(db.get_user_all_goals(m['id'])) for m in team_members])
-            st.markdown(f"""
-                <div style="background:#FFF; width:100%; height:160px; padding:20px; border-radius:10px;
-                    text-align:center; display:flex; flex-direction:column; justify-content:center;
-                    box-shadow:0 2px 4px rgba(0,0,0,0.08), 0 0 18px rgba(56,249,215,0.23);">
-                    <div style="font-size:28px; font-weight:700; color:#10B981; margin-bottom:6px;">
-                        {team_goals}
-                    </div>
-                    <div style="font-size:13px; font-weight:700; text-transform:uppercase;
-                        color:#10B981; padding:4px 10px; border-radius:6px; display:inline-block;">Team Goals
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+        # Month selector for team performance
+        col_team_filter1, col_team_filter2 = st.columns([4, 1])
 
-        
-        with col3:
-            team_completed = sum([db.get_user_goal_stats(m['id']).get('completed_goals', 0) for m in team_members])
-            st.markdown(f"""
-                <div style="background:#FFF; width:100%; height:160px; padding:20px; border-radius:10px;
-                    text-align:center; display:flex; flex-direction:column; justify-content:center;
-                    box-shadow:0 2px 4px rgba(0,0,0,0.08), 0 0 18px rgba(245,87,108,0.23);">
-                    <div style="font-size:28px; font-weight:700; color:#F5576C; margin-bottom:6px;">
-                        {team_completed}
-                    </div>
-                    <div style="font-size:13px; font-weight:700; text-transform:uppercase;color:#F5576C;padding:4px 10px; border-radius:6px; display:inline-block;">
-                    Completed
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+        with col_team_filter1:
+            st.caption("Filter team performance by month")
+
+        with col_team_filter2:
+            team_selected_month = st.selectbox(
+                "Month",
+                list(range(1, 13)),
+                index=current_month - 1,
+                format_func=lambda x: get_month_name(x),
+                key="team_month_select"
+            )
+
+        st.caption(f"**Team Performance: {get_month_name(team_selected_month)} {current_year}**")
+
+        # Calculate team metrics for selected month
+        team_total_goals = 0
+        team_completed_goals = 0
+        team_active_goals = 0
+        team_total_progress = 0
+        team_goals_count = 0
+        team_overdue_goals = 0
+
+        today_date = date.today()
+
+        for member in team_members:
+            member_month_goals = get_user_month_goals(member['id'], team_selected_month, current_year)
+            team_total_goals += len(member_month_goals)
+            team_completed_goals += len([g for g in member_month_goals if g.get('status') == 'Completed'])
+            team_active_goals += len([g for g in member_month_goals if g.get('status') == 'Active'])
             
-        with col4:
-            st.markdown(f"""
-                <div style="background:#FFF; width:100%; height:160px; padding:20px; border-radius:10px;
-                text-align:center; display:flex; flex-direction:column; justify-content:center;
-                box-shadow:0 2px 4px rgba(0,0,0,0.08), 0 0 18px rgba(245,158,11,0.23);">
-                <div style="font-size:28px; font-weight:700; color:#F59E0B; margin-bottom:6px;">
-                    {total_goals}
-                </div>
-                <div style="font-size:13px; font-weight:700; text-transform:uppercase;color:#F59E0B;
-                    padding:4px 10px; border-radius:6px; display:inline-block;">My Goals
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            for goal in member_month_goals:
+                achievement = goal.get('monthly_achievement')
+                if achievement is not None:
+                    target = goal.get('monthly_target', 1)
+                    if target > 0:
+                        progress = (achievement / target * 100)
+                        team_total_progress += progress
+                        team_goals_count += 1
+                
+                # Count overdue goals
+                if goal.get('status') == 'Active':
+                    end_date_str = goal.get('end_date')
+                    if end_date_str:
+                        try:
+                            end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                            if today_date > end_date:
+                                team_overdue_goals += 1
+                        except:
+                            pass
 
-        
+        team_avg_progress = (team_total_progress / team_goals_count) if team_goals_count > 0 else 0
+
+        col1, col2, col3, col4, col5 = st.columns(5)
+
+        # ================= TEAM METRICS =================
+
+# -------- col1 : Team Members --------
+        with col1:
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px rgba(118,75,162,0.23);
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;"></div>
+                    <div style="font-size:32px; font-weight:700; color:#764BA2; margin-bottom:6px;">
+                        {len(team_members)}
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#764BA2;
+                        padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Team Members
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+
+        # -------- col2 : Team Goals --------
+        with col2:
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px rgba(56,249,215,0.23);
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;"></div>
+                    <div style="font-size:32px; font-weight:700; color:#38F9D7; margin-bottom:6px;">
+                        {team_total_goals}
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#38F9D7;
+                        padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Team Goals
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+
+        # -------- col3 : Completed --------
+        with col3:
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px rgba(245,87,108,0.23);
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;"></div>
+                    <div style="font-size:32px; font-weight:700; color:#F5576C; margin-bottom:6px;">
+                        {team_completed_goals}
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#F5576C;
+                        padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Completed
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+
+        # -------- col4 : Avg Progress --------
+        with col4:
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px rgba(245,158,11,0.23);
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;"></div>
+                    <div style="font-size:32px; font-weight:700; color:#F59E0B; margin-bottom:6px;">
+                        {team_avg_progress:.1f}%
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#F59E0B;
+                        padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Avg Progress
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+
+        # -------- col5 : Overdue (Conditional) --------
+        with col5:
+            overdue_color = "#EF4444" if team_overdue_goals > 0 else "#10B981"
+            label_bg = "#FEF2F2" if team_overdue_goals > 0 else "#ECFDF5"
+            glow = "rgba(239,68,68,0.23)" if team_overdue_goals > 0 else "rgba(16,185,129,0.23)"
+            icon = "" if team_overdue_goals > 0 else ""
+
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px {glow};
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;">{icon}</div>
+                    <div style="font-size:32px; font-weight:700; color:{overdue_color}; margin-bottom:6px;">
+                        {team_overdue_goals}
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:{overdue_color};
+                        background:{label_bg}; padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Overdue
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
         st.markdown("---")
-        
+        # Team details modal
+        if st.session_state.get('show_details') and st.session_state.get('show_details').startswith('team_'):
+            st.markdown("---")
+            detail_type = st.session_state.show_details
+            
+            col_header, col_close = st.columns([5, 1])
+            
+            with col_header:
+                if detail_type == 'team_members':
+                    st.subheader(f" Team Members ({len(team_members)})")
+                elif detail_type == 'team_goals':
+                    st.subheader(f" All Team Goals ({team_total_goals}) - {get_month_name(team_selected_month)} {current_year}")
+                elif detail_type == 'team_completed':
+                    st.subheader(f" Team Completed Goals ({team_completed_goals})")
+                elif detail_type == 'team_progress':
+                    st.subheader(f" Team Progress Breakdown")
+                elif detail_type == 'team_overdue':
+                    st.subheader(f" Team Overdue Goals ({team_overdue_goals})")
+            
+            with col_close:
+                if st.button("✕ Close", key="close_team_details"):
+                    del st.session_state.show_details
+                    st.rerun()
+            
+            # Show team details
+            if detail_type == 'team_members':
+                # Display team members list
+                members_data = []
+                for member in team_members:
+                    member_goals = get_user_month_goals(member['id'], team_selected_month, current_year)
+                    completed = len([g for g in member_goals if g.get('status') == 'Completed'])
+                    
+                    # Count member's overdue goals
+                    member_overdue = 0
+                    for goal in member_goals:
+                        if goal.get('status') == 'Active':
+                            end_date_str = goal.get('end_date')
+                            if end_date_str:
+                                try:
+                                    end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                                    if today_date > end_date:
+                                        member_overdue += 1
+                                except:
+                                    pass
+                    
+                    members_data.append({
+                        'Name': member['name'],
+                        'Email': member['email'],
+                        'Department': member.get('department', 'N/A'),
+                        'Total Goals': len(member_goals),
+                        'Completed': completed,
+                        'Overdue': member_overdue
+                    })
+                
+                df_members = pd.DataFrame(members_data)
+                st.dataframe(df_members, use_container_width=True, height=400)
+                
+            else:
+                # Collect all team goals
+                all_team_goals = []
+                for member in team_members:
+                    member_goals = get_user_month_goals(member['id'], team_selected_month, current_year)
+                    for goal in member_goals:
+                        goal['member_name'] = member['name']
+                    all_team_goals.extend(member_goals)
+                
+                # Filter based on detail type
+                if detail_type == 'team_completed':
+                    display_goals = [g for g in all_team_goals if g.get('status') == 'Completed']
+                elif detail_type == 'team_overdue':
+                    display_goals = []
+                    for goal in all_team_goals:
+                        if goal.get('status') == 'Active':
+                            end_date_str = goal.get('end_date')
+                            if end_date_str:
+                                try:
+                                    end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                                    if today_date > end_date:
+                                        display_goals.append(goal)
+                                except:
+                                    pass
+                elif detail_type == 'team_progress':
+                    display_goals = all_team_goals.copy()
+                    for g in display_goals:
+                        achievement = g.get('monthly_achievement')
+                        target = g.get('monthly_target', 1)
+                        achievement_val = 0 if achievement is None else achievement
+                        target_val = 1 if target is None or target == 0 else target
+                        g['_progress'] = calculate_progress(achievement_val, target_val)
+                    display_goals.sort(key=lambda x: x['_progress'], reverse=True)
+                else:
+                    display_goals = all_team_goals
+                
+                if display_goals:
+                    goal_data = []
+                    for goal in display_goals:
+                        monthly_achievement = goal.get('monthly_achievement')
+                        monthly_target = goal.get('monthly_target', 1)
+                        achievement_value = 0 if monthly_achievement is None else monthly_achievement
+                        target_value = 1 if monthly_target is None or monthly_target == 0 else monthly_target
+                        progress = calculate_progress(achievement_value, target_value)
+                        
+                        goal_data.append({
+                            'Employee': goal['member_name'],
+                            'Goal Title': goal['goal_title'],
+                            'Department': goal.get('department', 'N/A'),
+                            'Month': get_month_name(goal.get('month', 1)),  # ADD THIS
+                            'Year': str(goal['year']), # ADD THIS
+                            'Target': monthly_target if monthly_target is not None else 0,
+                            'Achievement': monthly_achievement if monthly_achievement is not None else '-',
+                            'Progress': f"{progress:.1f}%",
+                            'Status': goal.get('status', 'Active')
+                        })
+                    
+                    df_goals = pd.DataFrame(goal_data)
+                    st.dataframe(df_goals, use_container_width=True, height=400)
+                    
+                    st.download_button(
+                        "📥 Export to CSV",
+                        df_goals.to_csv(index=False).encode('utf-8'),
+                        f"team_goals_{detail_type}_{team_selected_month}_{current_year}.csv",
+                        "text/csv",
+                        key='download_team_modal_details'
+                    )
+                else:
+                    st.info("No goals found in this category")
+            
+            st.markdown("---")
+            
+            st.markdown("---")
         # Top Performers from Team
-        st.markdown("### 🏆 Top 3 Team Performers (This Month)")
+        st.markdown("###  Top 3 Team Performers (This Month)")
         team_rankings = []
+
         for member in team_members:
             member_stats = db.get_user_goal_stats(member['id'])
             if member_stats.get('total_goals', 0) > 0:
@@ -3145,154 +5397,357 @@ def display_dashboard():
                     'Progress %': f"{member_stats.get('avg_progress', 0):.1f}%",
                     'Progress_Val': member_stats.get('avg_progress', 0)
                 })
-        
+
         if team_rankings:
             df_team_rank = pd.DataFrame(team_rankings)
-            df_team_rank = df_team_rank.sort_values('Progress_Val', ascending=False).head(3)  # Show top 3
+            df_team_rank = df_team_rank.sort_values('Progress_Val', ascending=False).head(3)
             df_team_rank = df_team_rank.drop('Progress_Val', axis=1)
             df_team_rank.insert(0, 'Rank', range(1, len(df_team_rank) + 1))
-            df_team_rank = df_team_rank.reset_index(drop=True)
-            st.dataframe(df_team_rank, use_container_width=True, height=300, hide_index=True)
+            st.dataframe(df_team_rank, use_container_width=True, height=200)
         else:
             st.info("No team performance data available yet")
-  
 
-    else:  # Employee
-    # Personal Performance Metrics for Employee
+    else:
+    # Employee view
         st.markdown("###  Your Performance Overview")
-        
-                # Get all user goals
+
+        # Month selector for employee's personal performance
+        col_emp_filter1, col_emp_filter2 = st.columns([4, 1])
+
+        with col_emp_filter1:
+            st.caption("Filter your personal goals by month")
+
+        with col_emp_filter2:
+            emp_selected_month = st.selectbox(
+                "Month",
+                list(range(1, 13)),
+                index=current_month - 1,
+                format_func=lambda x: get_month_name(x),
+                key="emp_month_select"
+            )
+
+        st.caption(f"**Your Performance: {get_month_name(emp_selected_month)} {current_year}**")
+
+        # Get all user goals
         all_user_goals = db.get_user_all_goals(user['id'])
 
-        # ✅ CRITICAL FIX: Filter to only APPROVED goals for employees
+        # Only approved goals count for employee metrics
         if user['role'] == 'Employee':
-            user_goals = [g for g in all_user_goals if g.get('approval_status') == 'approved']
+            approved_goals = [g for g in all_user_goals if g.get('approval_status') == 'approved']
+            # Filter by selected month
+            user_goals = [g for g in approved_goals if g['year'] == current_year and g.get('month') == emp_selected_month]
             
-            # Show pending count
             pending_count = len([g for g in all_user_goals if g.get('approval_status') == 'pending'])
             if pending_count > 0:
-                st.info(f"ℹ You have {pending_count} goal(s) pending manager approval (not shown in metrics)")
+                st.info(f"ℹ️ You have {pending_count} goal(s) pending manager approval (not shown in metrics)")
         else:
-            # Managers/HR/VP/CMD see all their goals
-            user_goals = all_user_goals
+            # Filter by selected month
+            user_goals = [g for g in all_user_goals if g['year'] == current_year and g.get('month') == emp_selected_month]
 
-        # ✅ Calculate metrics from filtered goals
         total_goals = len(user_goals)
         completed_goals = len([g for g in user_goals if g.get('status') == 'Completed'])
         active_goals = len([g for g in user_goals if g.get('status') == 'Active'])
-        
-        # Count overdue goals
+
+        total_progress = 0
+        goals_with_progress = 0
+        for goal in user_goals:
+            monthly_achievement = goal.get('monthly_achievement')
+            if monthly_achievement is not None:
+                monthly_target = goal.get('monthly_target', 1)
+                if monthly_target > 0:
+                    progress = (monthly_achievement / monthly_target * 100)
+                    total_progress += progress
+                    goals_with_progress += 1
+
+        avg_progress = (total_progress / goals_with_progress) if goals_with_progress > 0 else 0
+
         overdue_goals = 0
-        today = date.today()
+        today_date = date.today()
         for goal in user_goals:
             if goal.get('status') == 'Active':
                 end_date_str = goal.get('end_date')
                 if end_date_str:
                     try:
                         end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
-                        if today > end_date:
+                        if today_date > end_date:
                             overdue_goals += 1
                     except:
                         pass
-        
+
         col_perf1, col_perf2, col_perf3, col_perf4, col_perf5 = st.columns(5)
-        
-            # =============================
-        # CLEAN WHITE + GLOW KPI CARDS
-        # =============================
 
+        # ================= EMPLOYEE PERSONAL METRICS =================
+
+# -------- col_perf1 : Total Goals --------
         with col_perf1:
-            st.markdown(f"""
-            <div style="background:#FFF; width:100%; height:160px; padding:20px;
-                border-radius:10px; text-align:center;
-                display:flex; flex-direction:column; justify-content:center;
-                box-shadow:0 2px 4px rgba(0,0,0,0.08),
-                            0 0 18px rgba(59,130,246,0.25);">
-                <div style="font-size:32px; font-weight:700; color:#3B82F6; margin-bottom:6px;">{total_goals}
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px rgba(59,130,246,0.25);
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;"></div>
+                    <div style="font-size:32px; font-weight:700; color:#3B82F6; margin-bottom:6px;">
+                        {total_goals}
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#3B82F6;
+                        padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Total Goals
+                    </div>
                 </div>
-                <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#3B82F6;
-                    padding:4px 10px; border-radius:6px; display:inline-block;">Total Goals
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """,
+                unsafe_allow_html=True
+            )
 
+
+        # -------- col_perf2 : Completed --------
         with col_perf2:
-            st.markdown(f"""
-            <div style="background:#FFF; width:100%; height:160px; padding:20px; border-radius:10px; text-align:center;
-                display:flex; flex-direction:column; justify-content:center;
-                box-shadow:0 2px 4px rgba(0,0,0,0.08), 0 0 18px rgba(16,185,129,0.22);">
-                <div style="font-size:32px; font-weight:700; color:#10B981; margin-bottom:6px;">
-                    {completed_goals}
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px rgba(16,185,129,0.22);
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;"></div>
+                    <div style="font-size:32px; font-weight:700; color:#10B981; margin-bottom:6px;">
+                        {completed_goals}
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#10B981;
+                        padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Completed
+                    </div>
                 </div>
-                <div style=" font-size:13px; font-weight:700; text-transform:uppercase;
-                    color:#10B981; padding:4px 10px; border-radius:6px; display:inline-block;">Completed
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """,
+                unsafe_allow_html=True
+            )
 
+
+        # -------- col_perf3 : Active --------
         with col_perf3:
-            st.markdown(f"""
-            <div style=" background:#FFF; width:100%; height:160px; padding:20px;
-                border-radius:10px; text-align:center;
-                display:flex; flex-direction:column; justify-content:center;
-                box-shadow:0 2px 4px rgba(0,0,0,0.08), 0 0 18px rgba(245,87,108,0.23);">
-                <div style="font-size:32px; font-weight:700; color:#F5576C; margin-bottom:6px;">
-                    {active_goals}
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px rgba(245,87,108,0.23);
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;"></div>
+                    <div style="font-size:32px; font-weight:700; color:#F5576C; margin-bottom:6px;">
+                        {active_goals}
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#F5576C;
+                        padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Active
+                    </div>
                 </div>
-                <div style=" font-size:13px; font-weight:700; text-transform:uppercase;
-                    color:#F5576C; padding:4px 10px; border-radius:6px; display:inline-block;">Active
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """,
+                unsafe_allow_html=True
+            )
 
+
+        # -------- col_perf4 : Avg Progress --------
         with col_perf4:
-            st.markdown(f"""
-            <div style=" background:#FFF; width:100%; height:160px; padding:20px; border-radius:10px; text-align:center;
-                display:flex; flex-direction:column; justify-content:center;
-                box-shadow:0 2px 4px rgba(0,0,0,0.08), 0 0 18px rgba(0,201,255,0.23);">
-                <div style="font-size:32px; font-weight:700; color:#00C9FF; margin-bottom:6px;">
-                    {avg_progress:.1f}%
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px rgba(0,201,255,0.23);
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;"></div>
+                    <div style="font-size:32px; font-weight:700; color:#00C9FF; margin-bottom:6px;">
+                        {avg_progress:.1f}%
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#00C9FF;
+                        padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Avg Progress
+                    </div>
                 </div>
-                <div style=" font-size:13px; font-weight:700; text-transform:uppercase;
-                    color:#00C9FF; padding:4px 10px; border-radius:6px; display:inline-block;"> Avg Progress
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """,
+                unsafe_allow_html=True
+            )
 
+
+        # -------- col_perf5 : Overdue (Conditional) --------
         with col_perf5:
             overdue_color = "#EF4444" if overdue_goals > 0 else "#10B981"
             label_bg = "#FEF2F2" if overdue_goals > 0 else "#ECFDF5"
             glow = "rgba(239,68,68,0.23)" if overdue_goals > 0 else "rgba(16,185,129,0.23)"
+            icon = "" if overdue_goals > 0 else ""
 
-            st.markdown(f"""
-            <div style=" background:#FFF; width:100%; height:160px; padding:20px;
-                border-radius:10px; text-align:center;
-                display:flex; flex-direction:column; justify-content:center;
-                box-shadow:0 2px 4px rgba(0,0,0,0.08), 0 0 18px rgba(16,185,129,0.23);">
-                <div style="font-size:32px; font-weight:700; color:{overdue_color}; margin-bottom:6px;"> {overdue_goals} </div> 
-                <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:{overdue_color}; padding:4px 10px; border-radius:6px; display:inline-block;"> Overdue </div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px {glow};
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;">{icon}</div>
+                    <div style="font-size:32px; font-weight:700; color:{overdue_color}; margin-bottom:6px;">
+                        {overdue_goals}
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:{overdue_color};
+                        background:{label_bg}; padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Overdue
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
-    
-   # Notifications Section
+
+        # Employee personal details modal
+        if st.session_state.get('show_details') and st.session_state.get('show_details').startswith('emp_personal_'):
+            st.markdown("---")
+            detail_type = st.session_state.show_details
+            
+            col_header, col_close = st.columns([5, 1])
+            
+            with col_header:
+                if detail_type == 'emp_personal_total':
+                    st.subheader(f" Your Goals ({total_goals}) - {get_month_name(emp_selected_month)} {current_year}")
+                elif detail_type == 'emp_personal_completed':
+                    st.subheader(f" Your Completed Goals ({completed_goals})")
+                elif detail_type == 'emp_personal_active':
+                    st.subheader(f" Your Active Goals ({active_goals})")
+                elif detail_type == 'emp_personal_progress':
+                    st.subheader(f" Your Progress Breakdown")
+                elif detail_type == 'emp_personal_overdue':
+                    st.subheader(f" Your Overdue Goals ({overdue_goals})")
+            
+            with col_close:
+                if st.button("✕ Close", key="close_emp_personal_details"):
+                    del st.session_state.show_details
+                    st.rerun()
+            
+            # Filter goals
+            if detail_type == 'emp_personal_completed':
+                display_goals = [g for g in user_goals if g.get('status') == 'Completed']
+            elif detail_type == 'emp_personal_active':
+                display_goals = [g for g in user_goals if g.get('status') == 'Active']
+            elif detail_type == 'emp_personal_overdue':
+                display_goals = []
+                for goal in user_goals:
+                    if goal.get('status') == 'Active':
+                        end_date_str = goal.get('end_date')
+                        if end_date_str:
+                            try:
+                                end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                                if today_date > end_date:
+                                    display_goals.append(goal)
+                            except:
+                                pass
+            elif detail_type == 'emp_personal_progress':
+                display_goals = user_goals.copy()
+                for g in display_goals:
+                    achievement = g.get('monthly_achievement')
+                    target = g.get('monthly_target', 1)
+                    achievement_val = 0 if achievement is None else achievement
+                    target_val = 1 if target is None or target == 0 else target
+                    g['_progress'] = calculate_progress(achievement_val, target_val)
+                display_goals.sort(key=lambda x: x['_progress'], reverse=True)
+            else:
+                display_goals = user_goals
+            
+            # Display goals table
+            if display_goals:
+                goal_data = []
+                for goal in display_goals:
+
+
+                    monthly_achievement = goal.get('monthly_achievement')
+                    monthly_target = goal.get('monthly_target', 1)
+                    achievement_value = 0 if monthly_achievement is None else monthly_achievement
+                    target_value = 1 if monthly_target is None or monthly_target == 0 else monthly_target
+                    progress = calculate_progress(achievement_value, target_value)
+                    
+                    goal_data.append({
+                        'Goal Title': goal['goal_title'],
+                        'Department': goal.get('department', 'N/A'),
+                        'KPI': goal.get('kpi', 'N/A'),
+                        'Month': get_month_name(goal.get('month', 1)),  # ADD THIS
+                        'Year': str(goal['year']),  # ADD THIS
+                        'Target': monthly_target if monthly_target is not None else 0,
+                        'Achievement': monthly_achievement if monthly_achievement is not None else '-',
+                        'Progress': f"{progress:.1f}%",
+                        'Status': goal.get('status', 'Active')
+                    })
+                
+                df_goals = pd.DataFrame(goal_data)
+                st.dataframe(df_goals, use_container_width=True, height=400)
+                
+                st.download_button(
+                    "📥 Export to CSV",
+                    df_goals.to_csv(index=False).encode('utf-8'),
+                    f"emp_personal_goals_{detail_type}_{emp_selected_month}_{current_year}.csv",
+                    "text/csv",
+                    key='download_emp_personal_modal_details'
+                )
+            else:
+                st.info("No goals found in this category")
+            
+            st.markdown("---")
+
+    # Notifications Section (common to all roles)
     st.markdown("---")
-    
-    col_notif_header, col_notif_actions, col_notif_clear = st.columns([3, 1, 1])
+
+    col_notif_header, col_spacer, col_notif_actions, col_notif_clear = st.columns([4, 2, 1.2, 1.6])
+
     with col_notif_header:
-        st.markdown("###  Recent Activity & Reminders")
-    
-    # ADD THIS NEW SUMMARY SECTION
+        st.markdown("### 🔔 Recent Activity & Reminders")
+
     notifications = get_enhanced_notifications(user)
     unread_count = len([n for n in notifications if not n.get('is_read', False)])
 
-    # Count by type
-    notif_counts = {
-        'critical': 0,  # goal_not_completed, overdue, goal_not_updated
-        'important': 0,  # deadline, feedback_received
-        'normal': 0  # everything else
-    }
-
+    # Count by priority
+    notif_counts = {'critical': 0, 'important': 0, 'normal': 0}
     for notif in notifications:
         if not notif.get('is_read', False):
             notif_type = notif.get('type', '')
@@ -3303,154 +5758,70 @@ def display_dashboard():
             else:
                 notif_counts['normal'] += 1
 
-    # Display summary badges
-    col_badge1, col_badge2, col_badge3, col_badge4 = st.columns(4)
-
-        # =============================
-    # CLEAN WHITE + GLOW BADGE CARDS
-    # =============================
-
-    with col_badge1:  # Critical
-        st.markdown(f"""
-        <div style="background:#EF4444; width:100%; padding:14px; border-radius:10px;
-            text-align:center; display:flex; flex-direction:column; justify-content:center;
-            box-shadow:0 2px 4px rgba(0,0,0,0.06), 0 0 14px rgba(239,68,68,0.25);">
-            <div style="font-size:22px; font-weight:700; color:#FEE2E2;">
-                {notif_counts['critical']}
-            </div> 
-            <div style=" margin-top:4px; font-size:11px; font-weight:700; text-transform:uppercase;
-                 color:#FEE2E2; padding:3px 8px; border-radius:5px; display:inline-block;">Critical
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col_badge2:  # Important
-        st.markdown(f"""
-        <div style=" background:#F59E0B; width:100%; padding:14px; border-radius:10px;
-            text-align:center; display:flex; flex-direction:column; justify-content:center;
-            box-shadow:0 2px 4px rgba(0,0,0,0.06), 0 0 14px rgba(245,158,11,0.25);">
-            <div style="font-size:22px; font-weight:700; color:#FFF7DA;">
-                {notif_counts['important']}
-            </div>
-            <div style=" margin-top:4px; font-size:11px; font-weight:700; text-transform:uppercase;
-                color:#FFF7DA; padding:3px 8px; border-radius:5px; display:inline-block;"> Important
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col_badge3:  # Updates (Normal)
-        st.markdown(f"""
-        <div style=" background:#3B82F6; width:100%; padding:14px; border-radius:10px;
-            text-align:center; display:flex; flex-direction:column; justify-content:center;
-            box-shadow:0 2px 4px rgba(0,0,0,0.06), 0 0 14px rgba(59,130,246,0.25); ">
-            <div style="font-size:22px; font-weight:700; color:#DBEAFE;">
-                {notif_counts['normal']}
-            </div>
-            <div style=" margin-top:4px; font-size:11px; font-weight:700; text-transform:uppercase; color:#DBEAFE;
-                padding:3px 8px; border-radius:5px; display:inline-block;"> Updates
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col_badge4:  # Total Unread
-        st.markdown(f"""
-        <div style=" background: #64748B; width:100%; padding:14px; border-radius:10px;
-            text-align:center; display:flex; flex-direction:column; justify-content:center;
-            box-shadow:0 2px 4px rgba(0,0,0,0.06), 0 0 14px rgba(100,116,139,0.25); ">
-            <div style="font-size:22px; font-weight:700; color:#E2E8F0;">
-                {unread_count}
-            </div> 
-            <div style=" margin-top:4px; font-size:11px; font-weight:700; text-transform:uppercase; color:#E2E8F0; padding:3px 8px; border-radius:5px; display:inline-block;">Total Unread
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
     with col_notif_actions:
-        if st.button("View All", use_container_width=True):
+        st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
+        if st.button("View All"):
             st.session_state.show_all_notifications = True
+
     with col_notif_clear:
-        if st.button("✓ Mark All Read", use_container_width=True):
+        st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
+        if st.button("✓ Mark All Read"):
             try:
-                # Mark all unread notifications as read
                 supabase.table('notifications').update({
                     'is_read': True,
                     'read_at': datetime.now(IST).isoformat()
                 }).eq('user_id', user['id']).eq('is_read', False).execute()
-                
                 st.success("✅ All notifications marked as read!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Error: {str(e)}")
-   
-        
-    notifications = get_enhanced_notifications(user)
-    unread_count = len([n for n in notifications if not n.get('is_read', False)])
 
     st.caption(f"**{unread_count} unread notifications**")
-    
-    # ✅ FILTER: Only show UNREAD notifications
+
+    # Show only unread notifications
     unread_notifications = [n for n in notifications if not n.get('is_read', False)]
 
     if unread_notifications:
-        # Show top 5 or all based on state
         display_count = len(unread_notifications) if st.session_state.get('show_all_notifications') else 5
-        
+
         for notif in unread_notifications[:display_count]:
             notif_type = notif['type']
-            
+
             if notif_type == 'goal_created':
-                icon = "📝"
-                color = "#3b82f6"
+                icon, color = "📝", "#3b82f6"
             elif notif_type == 'goal_approved':
-                icon = "✅"
-                color = "#10b981"
+                icon, color = "✅", "#10b981"
             elif notif_type == 'goal_edited':
-                icon = "✏️"
-                color = "#f59e0b"
+                icon, color = "✏️", "#f59e0b"
             elif notif_type == 'goal_deleted':
-                icon = "🗑️"
-                color = "#ef4444"
+                icon, color = "🗑️", "#ef4444"
             elif notif_type == 'achievement':
-                icon = "🎉"
-                color = "#10b981"
+                icon, color = "🎉", "#10b981"
             elif notif_type == 'goal_not_completed':
-                icon = "❌"
-                color = "#ef4444"
+                icon, color = "❌", "#ef4444"
             elif notif_type == 'update':
-                icon = "📊"
-                color = "#3b82f6"
+                icon, color = "📊", "#3b82f6"
             elif notif_type == 'goal_not_updated':
-                icon = "⚠️"
-                color = "#f97316"
+                icon, color = "⚠️", "#f97316"
             elif notif_type == 'feedback':
-                icon = "💬"
-                color = "#8b5cf6"
+                icon, color = "💬", "#8b5cf6"
             elif notif_type == 'feedback_given':
-                icon = "✍️"
-                color = "#6366f1"
+                icon, color = "✍️", "#6366f1"
             elif notif_type == 'feedback_reply':
-                icon = "↩️"
-                color = "#8b5cf6"
+                icon, color = "↩️", "#8b5cf6"
             elif notif_type == 'deadline':
-                icon = "⏰"
-                color = "#f59e0b"
+                icon, color = "⏰", "#f59e0b"
             elif notif_type == 'overdue':
-                icon = "🚨"
-                color = "#ef4444"
+                icon, color = "🚨", "#ef4444"
             elif notif_type == 'assignment':
-                icon = "📬"
-                color = "#3b82f6"
+                icon, color = "📬", "#3b82f6"
             else:
-                icon = "ℹ️"
-                color = "#64748b"
-            
-            # Create columns for inline tick button
+                icon, color = "ℹ️", "#64748b"
+
             col_notif, col_tick = st.columns([20, 1])
-            
             with col_notif:
                 st.markdown(f'''
-                <div style="background: #ffffff; padding: 12px 16px; border-radius: 8px; border-left: 4px solid {color}; 
-                            box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                <div style="background: #ffffff; padding: 12px 16px; border-radius: 8px; border-left: 4px solid {color}; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
                     <div style="display: flex; justify-content: space-between; align-items: start;">
                         <div style="flex: 1;">
                             <div style="font-weight: 600; color: #1e293b; margin-bottom: 4px;">
@@ -3466,140 +5837,135 @@ def display_dashboard():
                     </div>
                 </div>
                 ''', unsafe_allow_html=True)
-            
-            # Tick mark button on the right
+
             with col_tick:
                 if notif.get('notification_id'):
                     if st.button("✓", key=f"mark_read_{notif.get('notification_id')}", help="Mark as read"):
                         if mark_notification_read(notif.get('notification_id')):
                             st.rerun()
-        
-        # Show more button only if there are more unread notifications
+
+        # Show more / show less button
         if len(unread_notifications) > 5 and not st.session_state.get('show_all_notifications'):
-            if st.button("📋 Show All Notifications", use_container_width=True):
+            if st.button(" Show All Notifications", use_container_width=True):
                 st.session_state.show_all_notifications = True
                 st.rerun()
         elif st.session_state.get('show_all_notifications'):
-            if st.button("📋 Show Less", use_container_width=True):
+            if st.button(" Show Less", use_container_width=True):
                 st.session_state.show_all_notifications = False
                 st.rerun()
     else:
-        st.info("✨ All caught up! No new notifications.")
+        st.info(" All caught up! No new notifications.")
 
 def get_enhanced_notifications(user):
     """Get enhanced notifications from database only"""
     notifications = []
     role = user['role']
-    today = date.today()
-    # ✅ FIX: Use timezone-aware IST datetime
-    now = datetime.now(IST)
     
     # ✅ Fetch database notifications
     db_notifications = get_user_notifications(user['id'], limit=100)
     
+    print(f" Fetched {len(db_notifications)} notifications for {user['name']}")
+    
+    if not db_notifications:
+        print(f"⚠️ No notifications found in database for user {user['id']}")
+        return []
+    
     for notif in db_notifications:
         try:
-            created_at = notif.get('created_at')
-            notif_datetime = None
+            created_at = notif.get('created_at', 'Unknown time')
             
-            if created_at:
-                try:
-                    if isinstance(created_at, str):
-                        # Parse ISO format timestamp
-                        if 'T' in created_at:
-                            # Handle timezone info in string
-                            if '+' in created_at or created_at.endswith('Z'):
-                                # Parse with timezone and convert to IST
-                                notif_datetime = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                                notif_datetime = notif_datetime.astimezone(IST)
-                            else:
-                                # Parse as UTC and convert to IST
-                                notif_datetime = datetime.strptime(created_at[:19], '%Y-%m-%dT%H:%M:%S')
-                                notif_datetime = pytz.utc.localize(notif_datetime).astimezone(IST)
-                        else:
-                            # Date only - use IST midnight
-                            notif_datetime = datetime.strptime(created_at[:10], '%Y-%m-%d')
-                            notif_datetime = IST.localize(notif_datetime)
-                    elif isinstance(created_at, datetime):
-                        # Already datetime object
-                        if created_at.tzinfo is None:
-                            # Assume UTC if no timezone
-                            notif_datetime = pytz.utc.localize(created_at).astimezone(IST)
-                        else:
-                            # Convert to IST
-                            notif_datetime = created_at.astimezone(IST)
+            # ✅ ROBUST TIME CALCULATION
+            time_ago = "Recently"
+            try:
+                if isinstance(created_at, str) and created_at:
+                    # Remove timezone indicator
+                    timestamp_str = created_at.replace('Z', '').replace('+00:00', '')
+                    
+                    # Handle microseconds - normalize to 6 digits or remove entirely
+                    if '.' in timestamp_str:
+                        date_part, micro_part = timestamp_str.rsplit('.', 1)
+                        
+                        # Clean microseconds - keep only digits
+                        micro_digits = ''.join(c for c in micro_part if c.isdigit())
+                        
+                        if len(micro_digits) > 6:
+                            micro_digits = micro_digits[:6]
+                        elif len(micro_digits) < 6:
+                            micro_digits = micro_digits.ljust(6, '0')
+                        
+                        timestamp_str = f"{date_part}.{micro_digits}"
+                        format_str = '%Y-%m-%dT%H:%M:%S.%f'
                     else:
-                        notif_datetime = now
-                except Exception as e:
-                    print(f"Error parsing date '{created_at}': {str(e)}")
-                    notif_datetime = now
-            else:
-                notif_datetime = now
+                        format_str = '%Y-%m-%dT%H:%M:%S'
+                    
+                    # Parse timestamp
+                    notif_dt = datetime.strptime(timestamp_str, format_str)
+                    notif_dt = pytz.utc.localize(notif_dt)
+                    
+                    # Calculate time difference
+                    now_dt = datetime.now(pytz.utc)
+                    time_diff = now_dt - notif_dt
+                    hours = time_diff.total_seconds() / 3600
+                    
+                    if hours < 0:
+                        time_ago = "Just now"
+                    elif hours < 1:
+                        minutes = max(0, int(hours * 60))
+                        time_ago = f"{minutes} min ago" if minutes > 0 else "Just now"
+                    elif hours < 24:
+                        hours_int = int(hours)
+                        time_ago = f"{hours_int} hour{'s' if hours_int != 1 else ''} ago"
+                    else:
+                        days = int(hours / 24)
+                        time_ago = f"{days} day{'s' if days != 1 else ''} ago"
+                        
+            except Exception as e:
+                # Silently default to "Recently" - don't spam logs
+                time_ago = "Recently"
             
-            # ✅ Ensure both datetimes are timezone-aware
-            if notif_datetime.tzinfo is None:
-                notif_datetime = IST.localize(notif_datetime)
+            action_type = notif.get('action_type', 'update')
             
-            # Calculate time difference
-            time_diff = now - notif_datetime
-            days_since = time_diff.days
+            # Map action types to notification types
+            type_map = {
+                'goal_created': ('goal_created', '📝'),
+                'goal_approved': ('goal_approved', '✅'),
+                'goal_edited': ('goal_edited', '✏️'),
+                'goal_deleted': ('goal_deleted', '🗑️'),
+                'goal_completed': ('achievement', '🎉'),
+                'goal_not_completed': ('goal_not_completed', '❌'),
+                'goal_assigned': ('assignment', '🎯'),
+                'weekly_achievement_updated': ('update', '📊'),
+                'goal_not_updated': ('goal_not_updated', '⚠️'),
+                'feedback_received': ('feedback', '💬'),
+                'feedback_given': ('feedback_given', '✍️'),
+                'feedback_reply': ('feedback_reply', '↩️'),
+                'goal_due_soon': ('deadline', '⏰'),
+                'goal_overdue': ('overdue', '🚨'),
+                'achievement_approved': ('goal_approved', '✅'),
+                'achievement_rejected': ('goal_not_completed', '❌'),
+                'test_notification': ('update', '🧪')
+            }
             
-            # ✅ Only show notifications with valid (non-negative) time
-            if days_since <= 90 and days_since >= 0:
-                hours_since = time_diff.total_seconds() / 3600
-                
-                # Format time ago
-                if hours_since < 0:
-                    time_ago = "Just now"
-                elif hours_since < 1:
-                    minutes = max(0, int(hours_since * 60))
-                    time_ago = f"{minutes} minute{'s' if minutes != 1 else ''} ago"
-                elif hours_since < 24:
-                    hours = int(hours_since)
-                    time_ago = f"{hours} hour{'s' if hours != 1 else ''} ago"
-                elif days_since == 1:
-                    time_ago = "Yesterday"
-                else:
-                    time_ago = f"{days_since} day{'s' if days_since != 1 else ''} ago"
-                
-                action_type = notif.get('action_type', 'update')
-                
-                # Map action types to notification types and icons
-                type_map = {
-                    'goal_created': ('goal_created', '📝'),
-                    'goal_approved': ('goal_approved', '✅'),
-                    'goal_edited': ('goal_edited', '✏️'),
-                    'goal_deleted': ('goal_deleted', '🗑️'),
-                    'goal_completed': ('achievement', '🎉'),
-                    'goal_not_completed': ('goal_not_completed', '❌'),
-                    'goal_assigned': ('assignment', '🎯'),
-                    'weekly_achievement_updated': ('update', '📊'),
-                    'goal_not_updated': ('goal_not_updated', '⚠️'),
-                    'feedback_received': ('feedback', '💬'),
-                    'feedback_given': ('feedback_given', '✍️'),
-                    'feedback_reply': ('feedback_reply', '↩️'),
-                    'goal_due_soon': ('deadline', '⏰'),
-                    'goal_overdue': ('overdue', '🚨')
-                }
-                
-                notif_type, icon = type_map.get(action_type, ('update', 'ℹ️'))
-                
-                notifications.append({
-                    'type': notif_type,
-                    'title': notif.get('action_type', 'Update').replace('_', ' ').title(),
-                    'message': notif.get('details', 'No details available'),
-                    'time': time_ago,
-                    'timestamp': notif_datetime,
-                    'priority': 0 if not notif.get('is_read') else 5,
-                    'is_read': notif.get('is_read', False),
-                    'notification_id': notif.get('id')
-                })
-                
+            notif_type, icon = type_map.get(action_type, ('update', 'ℹ️'))
+            
+            notifications.append({
+                'type': notif_type,
+                'title': notif.get('action_type', 'Update').replace('_', ' ').title(),
+                'message': notif.get('details', 'No details available'),
+                'time': time_ago,
+                'timestamp': created_at,
+                'priority': 0 if not notif.get('is_read') else 5,
+                'is_read': notif.get('is_read', False),
+                'notification_id': notif.get('id')
+            })
+            
         except Exception as e:
-            print(f"Error parsing notification: {str(e)}")
+            # Skip problematic notifications silently
             continue
     
-    # Sort by priority and timestamp
+    print(f"✅ Processed {len(notifications)} valid notifications")
+    
+    # Sort by priority and read status
     priority_weights = {
         'goal_not_completed': 1,
         'overdue': 1,
@@ -3616,23 +5982,87 @@ def get_enhanced_notifications(user):
     }
 
     notifications.sort(key=lambda x: (
-        priority_weights.get(x.get('type', ''), 999),
-        -(x.get('timestamp', datetime.min.replace(tzinfo=IST)).timestamp())
+        x.get('priority', 999),  # Unread first (priority 0)
+        priority_weights.get(x.get('type', ''), 999)
     ))
     
-    # Remove duplicates based on notification_id
-    seen = set()
-    unique_notifications = []
-    for n in notifications:
-        nid = n.get('notification_id')
-        if nid and nid not in seen:
-            seen.add(nid)
-            unique_notifications.append(n)
-        elif not nid:
-            unique_notifications.append(n)
+    return notifications[:50]
 
-    return unique_notifications[:50]
-
+def debug_notifications():
+    """Debug notification database"""
+    st.title("🔍 Notification Debugger")
+    
+    user = st.session_state.user
+    
+    st.markdown(f"**Current User:** {user['name']} (ID: {user['id']})")
+    
+    # Check raw database
+    st.subheader(" Raw Database Query")
+    
+    try:
+        # Get ALL notifications
+        all_notifs = supabase.table('notifications').select('*').order(
+            'created_at', desc=True
+        ).limit(20).execute()
+        
+        if all_notifs.data:
+            st.success(f"✅ Found {len(all_notifs.data)} total notifications in database")
+            
+            # Show raw data
+            df = pd.DataFrame(all_notifs.data)
+            st.dataframe(df, use_container_width=True, height=300)
+            
+            # Check for current user
+            user_notifs = [n for n in all_notifs.data if n.get('user_id') == user['id']]
+            st.info(f"📍 {len(user_notifs)} notifications belong to current user")
+            
+            if user_notifs:
+                st.markdown("**Your Notifications:**")
+                for n in user_notifs[:5]:
+                    st.json(n)
+            else:
+                st.warning("⚠️ No notifications found for current user!")
+                st.info("Check if user_id in notifications matches your user ID")
+                
+        else:
+            st.error("❌ No notifications found in database")
+            
+    except Exception as e:
+        st.error(f"Database error: {str(e)}")
+    
+    st.markdown("---")
+    
+    # Test creating a notification
+    st.subheader(" Test Create Notification")
+    
+    if st.button("Create Test Notification"):
+        test_notif = {
+            'user_id': user['id'],
+            'action_by': user['id'],
+            'action_by_name': user['name'],
+            'action_type': 'test_notification',
+            'details': f'Test notification created at {datetime.now(IST).strftime("%H:%M:%S")}',
+            'is_read': False,
+            'created_at': datetime.now(IST).isoformat()
+        }
+        
+        result = create_notification(test_notif)
+        
+        if result:
+            st.success("✅ Test notification created!")
+            st.json(result)
+            
+            # Try to fetch it back
+            fetched = get_user_notifications(user['id'], limit=5)
+            st.info(f" Fetched {len(fetched)} notifications after creation")
+            
+            if fetched:
+                st.success("✅ Notification successfully retrieved!")
+                st.json(fetched[0])
+            else:
+                st.error("❌ Could not retrieve the notification we just created!")
+        else:
+            st.error("❌ Failed to create test notification")
 def check_and_notify_missed_deadlines():
     """Check for goals past their deadline and notify managers"""
     try:
@@ -3700,48 +6130,181 @@ def display_view_all_goals():
     role = user['role']
     
     if not user:
-        st.warning(" Session expired. Please login again.")
+        st.warning("⚠️ Session expired. Please login again.")
         st.rerun()
 
-    # Back button
+    # Check if viewing organization-wide goals
+    view_mode = st.session_state.get('view_all_goals_mode', 'personal')
+    # In display_dashboard() function, add at the very top:
+    import time
+
+    # ✅ Force notification refresh
+    if 'last_notif_check' not in st.session_state:
+        st.session_state.last_notif_check = time.time()
+
+    # Check every 30 seconds
+    current_time = time.time()
+    if current_time - st.session_state.last_notif_check > 30:
+        st.session_state.last_notif_check = current_time
+        st.rerun()
+    # Back button - different destinations based on mode
     col1, col2 = st.columns([1, 5])
     with col1:
-        if st.button("← Back to My Goals"):
-            st.session_state.page = 'my_goals'
-            st.rerun()
-    with col2:
-        st.title(" View All Goals")
-    
-    # Select user (HR can see all, Manager can see team, Employee sees own)
-    if role == 'HR':
-        all_users = db.get_all_users()
-        selected_user = st.selectbox(
-            "Select User",
-            [f"{u['name']} ({u['email']})" for u in all_users]
-        )
-        user_email = selected_user.split('(')[1].strip(')')
-        selected_user_obj = next(u for u in all_users if u['email'] == user_email)
-        view_user_id = selected_user_obj['id']
-    elif role == 'Manager':
-        team_members = db.get_team_members(user['id'])
-        if team_members:
-            selected_user = st.selectbox(
-                "Select Team Member",
-                [user['name']] + [f"{m['name']} ({m['email']})" for m in team_members]
-            )
-            if selected_user == user['name']:
-                view_user_id = user['id']
-            else:
-                user_email = selected_user.split('(')[1].strip(')')
-                selected_user_obj = next(m for m in team_members if m['email'] == user_email)
-                view_user_id = selected_user_obj['id']
+        if view_mode == 'organization':
+            if st.button("← Back "):
+                st.session_state.page = 'hr_info'
+                st.session_state.pop('view_all_goals_mode', None)
+                st.rerun()
         else:
-            view_user_id = user['id']
-    else:
-        view_user_id = user['id']
+            if st.button("← Back"):
+                st.session_state.page = 'my_goals'
+                st.rerun()
     
-    # Get all goals for selected user
-    all_goals = db.get_user_all_goals(view_user_id)
+    with col2:
+        if view_mode == 'organization':
+            st.title(" All Organization Goals")
+        else:
+            st.title(" View All Goals")
+    
+    # Select user based on mode
+    if view_mode == 'organization' and role in ['CMD', 'VP', 'HR']:
+        # Organization-wide view - show all users
+        all_users = db.get_all_users()
+        
+        # Filter users based on role permissions
+        if role == 'HR':
+            viewable_users = all_users
+        elif role == 'VP':
+            viewable_users = [u for u in all_users if u['role'] in ['VP', 'HR', 'Manager', 'Employee']]
+        else:  # CMD
+            viewable_users = all_users
+        
+        user_options = ["All Users"] + [f"{u['name']} ({u['role']}) - {u['email']}" for u in viewable_users]
+        selected_user_option = st.selectbox("Select User", user_options)
+        
+        if selected_user_option == "All Users":
+            # Get all goals from all viewable users
+            all_goals = []
+            for u in viewable_users:
+                user_goals = db.get_user_all_goals(u['id'])
+                for g in user_goals:
+                    g['user_name'] = u['name']
+                    g['user_role'] = u['role']
+                    g['user_department'] = u.get('department', 'N/A')
+                all_goals.extend(user_goals)
+            view_user_id = None  # Special case for all users
+        else:
+            user_email = selected_user_option.split(' - ')[1]
+            selected_user_obj = next(u for u in viewable_users if u['email'] == user_email)
+            view_user_id = selected_user_obj['id']
+            all_goals = db.get_user_all_goals(view_user_id)
+            # Add user info to goals
+            for g in all_goals:
+                g['user_name'] = selected_user_obj['name']
+                g['user_role'] = selected_user_obj['role']
+                g['user_department'] = selected_user_obj.get('department', 'N/A')
+    
+    else:
+        # Personal/Team view (existing logic)
+        all_goals = []  # Initialize empty list
+        
+        if role == 'HR':
+            all_users = db.get_all_users()
+            selected_user = st.selectbox(
+                "Select User",
+                [f"{u['name']} ({u['email']})" for u in all_users],
+                key="hr_user_select"
+            )
+            user_email = selected_user.split('(')[1].strip(')')
+            selected_user_obj = next(u for u in all_users if u['email'] == user_email)
+            view_user_id = selected_user_obj['id']
+            all_goals = db.get_user_all_goals(view_user_id)
+            # Add user info
+            for g in all_goals:
+                g['user_name'] = selected_user_obj['name']
+                g['user_role'] = selected_user_obj['role']
+                g['user_department'] = selected_user_obj.get('department', 'N/A')
+        
+        elif role == 'CMD':
+            # CMD can view all users
+            all_users = db.get_all_users()
+            selected_user = st.selectbox(
+                "Select User",
+                [f"{u['name']} ({u['role']}) - {u['email']}" for u in all_users],
+                key="cmd_user_select"
+            )
+            user_email = selected_user.split(' - ')[1]
+            selected_user_obj = next(u for u in all_users if u['email'] == user_email)
+            view_user_id = selected_user_obj['id']
+            all_goals = db.get_user_all_goals(view_user_id)
+            # Add user info
+            for g in all_goals:
+                g['user_name'] = selected_user_obj['name']
+                g['user_role'] = selected_user_obj['role']
+                g['user_department'] = selected_user_obj.get('department', 'N/A')
+        
+        elif role == 'VP':
+            # VP can view VP, HR, Manager, Employee (not CMD)
+            all_users = db.get_all_users()
+            viewable_users = [u for u in all_users if u['role'] in ['VP', 'HR', 'Manager', 'Employee']]
+            selected_user = st.selectbox(
+                "Select User",
+                [f"{u['name']} ({u['role']}) - {u['email']}" for u in viewable_users],
+                key="vp_user_select"
+            )
+            user_email = selected_user.split(' - ')[1]
+            selected_user_obj = next(u for u in viewable_users if u['email'] == user_email)
+            view_user_id = selected_user_obj['id']
+            all_goals = db.get_user_all_goals(view_user_id)
+            # Add user info
+            for g in all_goals:
+                g['user_name'] = selected_user_obj['name']
+                g['user_role'] = selected_user_obj['role']
+                g['user_department'] = selected_user_obj.get('department', 'N/A')
+        
+        elif role == 'Manager':
+            team_members = db.get_team_members(user['id'])
+            if team_members:
+                selected_user = st.selectbox(
+                    "Select Team Member",
+                    [user['name']] + [f"{m['name']} ({m['email']})" for m in team_members],
+                    key="manager_user_select"
+                )
+                if selected_user == user['name']:
+                    view_user_id = user['id']
+                    all_goals = db.get_user_all_goals(view_user_id)
+                    # Add user info
+                    for g in all_goals:
+                        g['user_name'] = user['name']
+                        g['user_role'] = user['role']
+                        g['user_department'] = user.get('department', 'N/A')
+                else:
+                    user_email = selected_user.split('(')[1].strip(')')
+                    selected_user_obj = next(m for m in team_members if m['email'] == user_email)
+                    view_user_id = selected_user_obj['id']
+                    all_goals = db.get_user_all_goals(view_user_id)
+                    # Add user info
+                    for g in all_goals:
+                        g['user_name'] = selected_user_obj['name']
+                        g['user_role'] = selected_user_obj['role']
+                        g['user_department'] = selected_user_obj.get('department', 'N/A')
+            else:
+                view_user_id = user['id']
+                all_goals = db.get_user_all_goals(view_user_id)
+                # Add user info
+                for g in all_goals:
+                    g['user_name'] = user['name']
+                    g['user_role'] = user['role']
+                    g['user_department'] = user.get('department', 'N/A')
+        
+        else:  # Employee
+            view_user_id = user['id']
+            all_goals = db.get_user_all_goals(view_user_id)
+            # Add user info
+            for g in all_goals:
+                g['user_name'] = user['name']
+                g['user_role'] = user['role']
+                g['user_department'] = user.get('department', 'N/A')
     
     if not all_goals:
         st.info("No goals found for this user")
@@ -3754,7 +6317,11 @@ def display_view_all_goals():
     with col2:
         filter_status = st.selectbox("Filter by Status", ["All", "Active", "Completed", "On Hold", "Cancelled"])
     with col3:
-        search_term = st.text_input(" Search Goal Title")
+        filter_month = st.selectbox(
+            "Filter by Month",
+            ["All"] + [get_month_name(i) for i in range(1, 13)],
+            key="view_all_goals_month_filter"
+        )
     
     # Apply filters
     filtered_goals = all_goals
@@ -3762,14 +6329,18 @@ def display_view_all_goals():
         filtered_goals = [g for g in filtered_goals if g['year'] == filter_year]
     if filter_status != "All":
         filtered_goals = [g for g in filtered_goals if g.get('status') == filter_status]
-    if search_term:
-        filtered_goals = [g for g in filtered_goals if search_term.lower() in g['goal_title'].lower()]
+    if filter_month != "All":
+        month_num = [get_month_name(i) for i in range(1, 13)].index(filter_month) + 1
+        filtered_goals = [g for g in filtered_goals if g.get('month') == month_num]
     
     st.markdown(f"**Showing {len(filtered_goals)} of {len(all_goals)} goals**")
     
     # Display goals in expandable cards
     for goal in filtered_goals:
-        progress = calculate_progress(goal.get('monthly_achievement', 0), goal.get('monthly_target', 1))
+        monthly_achievement = goal.get('monthly_achievement')
+        monthly_achievement = 0 if monthly_achievement is None else monthly_achievement
+        monthly_target = goal.get('monthly_target', 1)
+        progress = calculate_progress(monthly_achievement, monthly_target)
         
         # Determine status color
         if progress >= 100:
@@ -3782,11 +6353,22 @@ def display_view_all_goals():
             status_color = "#ef4444"
             status_text = "At Risk"
         
-        with st.expander(f" {goal['goal_title']} - {goal['year']}/Q{goal.get('quarter', 'N/A')}/M{goal.get('month', 'N/A')}"):
+        if view_mode == 'organization':
+            expander_title = f" {goal.get('user_name', 'Unknown')} ({goal.get('user_role', 'N/A')}) | 🎯 {goal['goal_title']} - {goal['year']}/Q{goal.get('quarter', 'N/A')}/M{goal.get('month', 'N/A')}"
+        else:
+            expander_title = f"🎯 {goal['goal_title']} - {goal['year']}/Q{goal.get('quarter', 'N/A')}/M{goal.get('month', 'N/A')}"
+        
+        with st.expander(expander_title):
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                st.markdown(f"**Department:** {goal.get('department', 'N/A')}")
+                # Show employee info in organization mode
+                if view_mode == 'organization':
+                    st.markdown(f"**Employee:** {goal.get('user_name', 'Unknown')}")
+                    st.markdown(f"**Role:** {goal.get('user_role', 'N/A')}")
+                    st.markdown(f"**Department:** {goal.get('user_department', 'N/A')}")
+                else:
+                    st.markdown(f"**Department:** {goal.get('department', 'N/A')}")
                 st.markdown(f"**KPI:** {goal.get('kpi', 'N/A')}")
             
             with col2:
@@ -3795,7 +6377,8 @@ def display_view_all_goals():
             
             with col3:
                 st.markdown(f"**Target:** {goal.get('monthly_target', 0)}")
-                st.markdown(f"**Achievement:** {goal.get('monthly_achievement', 0)}")
+                achievement_display = goal.get('monthly_achievement', 0) if goal.get('monthly_achievement') is not None else '-'
+                st.markdown(f"**Achievement:** {achievement_display}")
             
             with col4:
                 st.markdown(f"**Status:** <span style='color: {status_color}; font-weight: bold;'>{goal.get('status', 'Active')}</span>", unsafe_allow_html=True)
@@ -3839,7 +6422,9 @@ def display_view_all_goals():
             with col2:
                 new_status = st.selectbox("Status", ['Active', 'Completed', 'On Hold', 'Cancelled'],
                                          index=['Active', 'Completed', 'On Hold', 'Cancelled'].index(edit_goal.get('status', 'Active')))
-                new_monthly_achievement = st.number_input("Monthly Achievement", min_value=0.0, value=float(edit_goal.get('monthly_achievement', 0)))
+                achievement_val = edit_goal.get('monthly_achievement')
+                achievement_val = 0.0 if achievement_val is None else float(achievement_val)
+                new_monthly_achievement = st.number_input("Monthly Achievement", min_value=0.0, value=achievement_val)
                 new_description = st.text_area("Description", value=edit_goal.get('goal_description', ''))
             
             col_save, col_cancel = st.columns(2)
@@ -3878,37 +6463,511 @@ def display_hr_info():
     user = st.session_state.user
     
     if not user:
-        st.warning(" Session expired. Please login again.")
+        st.warning("⚠️ Session expired. Please login again.")
         st.rerun()
 
     # Allow CMD, VP, and HR to access
     if user['role'] not in ['CMD', 'VP', 'HR']:
-        st.warning(" You don't have permission to access this page")
+        st.warning("⚠️ You don't have permission to access this page")
         return
     
-    st.title(" HR Information Dashboard")
+    # Header with three-dot menu
+    col_title, col_menu = st.columns([10, 1])
+    with col_title:
+        st.title(" Organization Info")
+    
+    with col_menu:
+        # Three-dot menu using popover
+        with st.popover("⋮", use_container_width=True):
+            if st.button(" View All Goals", use_container_width=True, key="view_all_goals_hr_menu"):
+                st.session_state.page = 'view_all_goals'
+                st.session_state.view_all_goals_mode = 'organization'
+                st.rerun()
     
     all_users = db.get_all_users()
-    
-    # HR Stats
-    col1, col2, col3, col4 = st.columns(4)
+
+    # Calculate all metrics first
+    total_users = len(all_users)
+    total_goals = sum([len(db.get_user_all_goals(u['id'])) for u in all_users])
+    total_feedback = len(db.get_all_feedback())
+    active_goals = len(db.get_all_active_goals())
+
+    # Calculate overdue goals
+    overdue_count = 0
+    today = date.today()
+    for u in all_users:
+        user_goals = db.get_user_all_goals(u['id'])
+        for goal in user_goals:
+            if goal.get('status') == 'Active':
+                end_date_str = goal.get('end_date')
+                if end_date_str:
+                    try:
+                        end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                        if today > end_date:
+                            overdue_count += 1
+                    except:
+                        pass
+
+    # Display clickable metric cards
+    col1, col2, col3, col4, col5 = st.columns(5)
+
+    # ================= HR SUMMARY METRICS =================
+
+# -------- col1 : Total Users --------
     with col1:
-        total_users = len(all_users)
-        render_metric_card("Total Users", str(total_users), color="#3b82f6")
+        st.markdown(
+            f"""
+            <div style="
+                background:#FFFFFF;
+                width:100%;
+                height:160px;
+                padding:20px;
+                border-radius:10px;
+                text-align:center;
+                display:flex;
+                flex-direction:column;
+                justify-content:center;
+                box-shadow:
+                    0 2px 4px rgba(0,0,0,0.08),
+                    0 0 18px rgba(59,130,246,0.25);
+            ">
+                <div style="font-size:36px; margin-bottom:10px;"></div>
+                <div style="font-size:32px; font-weight:700; color:#3B82F6; margin-bottom:6px;">
+                    {total_users}
+                </div>
+                <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#3B82F6;
+                    padding:4px 10px; border-radius:6px; display:inline-block;">
+                    Total Users
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+
+    # -------- col2 : Total Goals --------
     with col2:
-        total_goals = sum([len(db.get_user_all_goals(u['id'])) for u in all_users])
-        render_metric_card("Total Goals", str(total_goals), color="#10b981")
+        st.markdown(
+            f"""
+            <div style="
+                background:#FFFFFF;
+                width:100%;
+                height:160px;
+                padding:20px;
+                border-radius:10px;
+                text-align:center;
+                display:flex;
+                flex-direction:column;
+                justify-content:center;
+                box-shadow:
+                    0 2px 4px rgba(0,0,0,0.08),
+                    0 0 18px rgba(139,92,246,0.25);
+            ">
+                <div style="font-size:36px; margin-bottom:10px;"></div>
+                <div style="font-size:32px; font-weight:700; color:#8B5CF6; margin-bottom:6px;">
+                    {total_goals}
+                </div>
+                <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#8B5CF6;
+                    padding:4px 10px; border-radius:6px; display:inline-block;">
+                    Total Goals
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+
+    # -------- col3 : Total Feedback --------
     with col3:
-        total_feedback = len(db.get_all_feedback())
-        render_metric_card("Total Feedback", str(total_feedback), color="#8b5cf6")
+        st.markdown(
+            f"""
+            <div style="
+                background:#FFFFFF;
+                width:100%;
+                height:160px;
+                padding:20px;
+                border-radius:10px;
+                text-align:center;
+                display:flex;
+                flex-direction:column;
+                justify-content:center;
+                box-shadow:
+                    0 2px 4px rgba(0,0,0,0.08),
+                    0 0 18px rgba(16,185,129,0.22);
+            ">
+                <div style="font-size:36px; margin-bottom:10px;"></div>
+                <div style="font-size:32px; font-weight:700; color:#10B981; margin-bottom:6px;">
+                    {total_feedback}
+                </div>
+                <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#10B981;
+                    padding:4px 10px; border-radius:6px; display:inline-block;">
+                    Total Feedback
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+
+    # -------- col4 : Active Goals --------
     with col4:
-        active_goals = len(db.get_all_active_goals())
-        render_metric_card("Active Goals", str(active_goals), color="#f59e0b")
-    
+        st.markdown(
+            f"""
+            <div style="
+                background:#FFFFFF;
+                width:100%;
+                height:160px;
+                padding:20px;
+                border-radius:10px;
+                text-align:center;
+                display:flex;
+                flex-direction:column;
+                justify-content:center;
+                box-shadow:
+                    0 2px 4px rgba(0,0,0,0.08),
+                    0 0 18px rgba(245,158,11,0.23);
+            ">
+                <div style="font-size:36px; margin-bottom:10px;"></div>
+                <div style="font-size:32px; font-weight:700; color:#F59E0B; margin-bottom:6px;">
+                    {active_goals}
+                </div>
+                <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#F59E0B;
+                    padding:4px 10px; border-radius:6px; display:inline-block;">
+                    Active Goals
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+
+    # -------- col5 : Overdue Goals --------
+    with col5:
+        overdue_color = "#EF4444" if overdue_count > 0 else "#10B981"
+        label_bg = "#FEF2F2" if overdue_count > 0 else "#ECFDF5"
+        glow = "rgba(239,68,68,0.23)" if overdue_count > 0 else "rgba(16,185,129,0.23)"
+        icon = "" if overdue_count > 0 else ""
+
+        st.markdown(
+            f"""
+            <div style="
+                background:#FFFFFF;
+                width:100%;
+                height:160px;
+                padding:20px;
+                border-radius:10px;
+                text-align:center;
+                display:flex;
+                flex-direction:column;
+                justify-content:center;
+                box-shadow:
+                    0 2px 4px rgba(0,0,0,0.08),
+                    0 0 18px {glow};
+            ">
+                <div style="font-size:36px; margin-bottom:10px;">{icon}</div>
+                <div style="font-size:32px; font-weight:700; color:{overdue_color}; margin-bottom:6px;">
+                    {overdue_count}
+                </div>
+                <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:{overdue_color};
+                    background:{label_bg}; padding:4px 10px; border-radius:6px; display:inline-block;">
+                    Overdue Goals
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
     st.markdown("---")
-    
+    # HR Dashboard Details Modal
+    if st.session_state.get('show_details') and st.session_state.get('show_details').startswith('hr_') and not st.session_state.get('show_details').startswith('hr_goal'):
+        st.markdown("---")
+        detail_type = st.session_state.show_details
+        
+        col_header, col_close = st.columns([5, 1])
+        
+        with col_header:
+            if detail_type == 'hr_users':
+                st.subheader(f" All Users ({total_users})")
+            elif detail_type == 'hr_goals':
+                st.subheader(f" All Goals ({total_goals})")
+            elif detail_type == 'hr_feedback':
+                st.subheader(f" All Feedback ({total_feedback})")
+            elif detail_type == 'hr_active_goals':
+                st.subheader(f" Active Goals ({active_goals})")
+            elif detail_type == 'hr_overdue_goals':
+                st.subheader(f" Overdue Goals ({overdue_count})")
+        
+        with col_close:
+            if st.button("✕ Close", key="close_hr_dashboard_details"):
+                del st.session_state.show_details
+                st.rerun()
+        
+        # Display details based on type
+        if detail_type == 'hr_users':
+            # Show all users table
+            users_data = []
+            for u in all_users:
+                stats = db.get_user_goal_stats(u['id'])
+                manager_name = "N/A"
+                if u.get('manager_id'):
+                    manager = db.get_user_by_id(u['manager_id'])
+                    if manager:
+                        manager_name = manager['name']
+                
+                users_data.append({
+                    'Name': u['name'],
+                    'Email': u['email'],
+                    'Role': u['role'],
+                    'Department': u.get('department', 'N/A'),
+                    'Manager': manager_name,
+                    'Total Goals': stats.get('total_goals', 0),
+                    'Completed': stats.get('completed_goals', 0),
+                    'Progress %': f"{stats.get('avg_progress', 0):.1f}%"
+                })
+            
+            df_users = pd.DataFrame(users_data)
+            st.dataframe(df_users, use_container_width=True, height=400)
+            
+            st.download_button(
+                "📥 Export to CSV",
+                df_users.to_csv(index=False).encode('utf-8'),
+                "all_users.csv",
+                "text/csv",
+                key='download_hr_users'
+            )
+        
+        elif detail_type == 'hr_goals':
+            # Show all goals
+            all_goals_list = []
+            for u in all_users:
+                user_goals = db.get_user_all_goals(u['id'])
+                for goal in user_goals:
+                    goal['user_name'] = u['name']
+                    goal['user_role'] = u['role']
+                    goal['user_department'] = u.get('department', 'N/A')
+                all_goals_list.extend(user_goals)
+            
+            if all_goals_list:
+                goal_data = []
+                for goal in all_goals_list:
+                    monthly_achievement = goal.get('monthly_achievement')
+                    monthly_target = goal.get('monthly_target', 1)
+                    achievement_value = 0 if monthly_achievement is None else monthly_achievement
+                    target_value = 1 if monthly_target is None or monthly_target == 0 else monthly_target
+                    progress = calculate_progress(achievement_value, target_value)
+                    
+                    goal_data.append({
+                        'Employee': goal['user_name'],
+                        'Role': goal['user_role'],
+                        'Department': goal['user_department'],
+                        'Goal Title': goal['goal_title'],
+                        'Month': get_month_name(goal.get('month', 1)),  # ADD THIS
+                        'Year': str(goal['year']),  # ADD THIS
+                        'Target': monthly_target if monthly_target is not None else 0,
+                        'Achievement': monthly_achievement if monthly_achievement is not None else '-',
+                        'Progress': f"{progress:.1f}%",
+                        'Status': goal.get('status', 'Active'),
+                        'Year': goal['year']
+                    })
+                
+                df_goals = pd.DataFrame(goal_data)
+                st.dataframe(df_goals, use_container_width=True, height=400)
+                
+                st.download_button(
+                    "📥 Export to CSV",
+                    df_goals.to_csv(index=False).encode('utf-8'),
+                    "all_goals.csv",
+                    "text/csv",
+                    key='download_hr_all_goals'
+                )
+            else:
+                st.info("No goals found")
+        
+        elif detail_type == 'hr_feedback':
+            # Show all feedback
+            all_feedback = db.get_all_feedback()
+            
+            if all_feedback:
+                feedback_data = []
+                for fb in all_feedback:
+                    # Get user info
+                    fb_user = db.get_user_by_id(fb.get('user_id'))
+                    user_name = fb_user['name'] if fb_user else 'Unknown'
+                    
+                    feedback_data.append({
+                        'Employee': user_name,
+                        'Goal': fb.get('goal_title', 'N/A'),
+                        'Type': fb.get('feedback_type', 'N/A'),
+                        'Rating': fb.get('rating', 0),
+                        'Comment': fb.get('comment', '')[:50] + '...' if len(fb.get('comment', '')) > 50 else fb.get('comment', ''),
+                        'Date': fb.get('created_at', 'N/A')[:10] if fb.get('created_at') else 'N/A'
+                    })
+                
+                df_feedback = pd.DataFrame(feedback_data)
+                st.dataframe(df_feedback, use_container_width=True, height=400)
+                
+                st.download_button(
+                    "📥 Export to CSV",
+                    df_feedback.to_csv(index=False).encode('utf-8'),
+                    "all_feedback.csv",
+                    "text/csv",
+                    key='download_hr_feedback'
+                )
+            else:
+                st.info("No feedback found")
+        
+        elif detail_type == 'hr_active_goals':
+            # Show active goals
+            active_goals_list = []
+            for u in all_users:
+                user_goals = db.get_user_all_goals(u['id'])
+                for goal in user_goals:
+                    if goal.get('status') == 'Active':
+                        goal['user_name'] = u['name']
+                        goal['user_role'] = u['role']
+                        goal['user_department'] = u.get('department', 'N/A')
+                        active_goals_list.append(goal)
+            
+            if active_goals_list:
+                goal_data = []
+                for goal in active_goals_list:
+                    monthly_achievement = goal.get('monthly_achievement')
+                    monthly_target = goal.get('monthly_target', 1)
+                    achievement_value = 0 if monthly_achievement is None else monthly_achievement
+                    target_value = 1 if monthly_target is None or monthly_target == 0 else monthly_target
+                    progress = calculate_progress(achievement_value, target_value)
+                    
+                    goal_data.append({
+                        'Employee': goal['user_name'],
+                        'Role': goal['user_role'],
+                        'Department': goal['user_department'],
+                        'Goal Title': goal['goal_title'],
+                        'Month': get_month_name(goal.get('month', 1)),  # ADD THIS
+                        'Year': str(goal['year']),  # ADD THIS
+                        'Target': monthly_target if monthly_target is not None else 0,
+                        'Achievement': monthly_achievement if monthly_achievement is not None else '-',
+                        'Progress': f"{progress:.1f}%",
+                        'End Date': goal.get('end_date', 'N/A')
+                    })
+                
+                df_goals = pd.DataFrame(goal_data)
+                st.dataframe(df_goals, use_container_width=True, height=400)
+                
+                st.download_button(
+                    "📥 Export to CSV",
+                    df_goals.to_csv(index=False).encode('utf-8'),
+                    "active_goals.csv",
+                    "text/csv",
+                    key='download_hr_active_goals'
+                )
+            else:
+                st.info("No active goals found")
+        
+        elif detail_type == 'hr_overdue_goals':
+            # Show overdue goals
+            overdue_goals_list = []
+            today = date.today()
+            
+            for u in all_users:
+                user_goals = db.get_user_all_goals(u['id'])
+                for goal in user_goals:
+                    if goal.get('status') == 'Active':
+                        end_date_str = goal.get('end_date')
+                        if end_date_str:
+                            try:
+                                end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                                if today > end_date:
+                                    goal['user_name'] = u['name']
+                                    goal['user_role'] = u['role']
+                                    goal['user_department'] = u.get('department', 'N/A')
+                                    goal['days_overdue'] = (today - end_date).days
+                                    overdue_goals_list.append(goal)
+                            except:
+                                pass
+            
+            if overdue_goals_list:
+                goal_data = []
+                for goal in overdue_goals_list:
+                    monthly_achievement = goal.get('monthly_achievement')
+                    monthly_target = goal.get('monthly_target', 1)
+                    achievement_value = 0 if monthly_achievement is None else monthly_achievement
+                    target_value = 1 if monthly_target is None or monthly_target == 0 else monthly_target
+                    progress = calculate_progress(achievement_value, target_value)
+                    
+                    goal_data.append({
+                        'Employee': goal['user_name'],
+                        'Role': goal['user_role'],
+                        'Department': goal['user_department'],
+                        'Goal Title': goal['goal_title'],
+                        'Month': get_month_name(goal.get('month', 1)),  # ADD THIS
+                        'Year': str(goal['year']),  # ADD THIS
+                        'Target': monthly_target if monthly_target is not None else 0,
+                        'Achievement': monthly_achievement if monthly_achievement is not None else '-',
+                        'Progress': f"{progress:.1f}%",
+                        'End Date': goal.get('end_date', 'N/A'),
+                        'Days Overdue': goal['days_overdue']
+                    })
+                
+                # Sort by days overdue (most overdue first)
+                df_goals = pd.DataFrame(goal_data)
+                df_goals = df_goals.sort_values('Days Overdue', ascending=False)
+                st.dataframe(df_goals, use_container_width=True, height=400)
+                
+                st.download_button(
+                    "📥 Export to CSV",
+                    df_goals.to_csv(index=False).encode('utf-8'),
+                    "overdue_goals.csv",
+                    "text/csv",
+                    key='download_hr_overdue_goals'
+                )
+            else:
+                st.info("No overdue goals found")
+        
+        st.markdown("---")
+     # Department-wise breakdown
+    col_left, col_right = st.columns([1, 1])
+
+    with col_left:
+        st.markdown("####  Department Distribution")
+        dept_count = {}
+        for u in all_users:
+            dept = normalize_department(u.get('department'))
+            dept_count[dept] = dept_count.get(dept, 0) + 1
+
+        if dept_count:
+            fig_dept = px.pie(
+                values=list(dept_count.values()),
+                names=list(dept_count.keys()),
+                title="Employees by Department",
+                hole=0.4,
+                color_discrete_sequence=px.colors.qualitative.Set3
+            )
+            fig_dept.update_traces(textposition='inside', textinfo='percent+label')
+            fig_dept.update_layout(height=350, showlegend=True)
+            st.plotly_chart(fig_dept, use_container_width=True)
+
+    with col_right:
+        st.markdown("####  Goals Performance")
+        total_goals_org = sum([len(db.get_user_all_goals(u['id'])) for u in all_users])
+        completed_goals_org = sum([db.get_user_goal_stats(u['id']).get('completed_goals', 0) for u in all_users])
+        active_goals_org = sum([db.get_user_goal_stats(u['id']).get('active_goals', 0) for u in all_users])
+
+        fig_goals = go.Figure(data=[
+            go.Bar(name='Total', x=['Goals'], y=[total_goals_org], marker_color='#3b82f6'),
+            go.Bar(name='Completed', x=['Goals'], y=[completed_goals_org], marker_color='#10b981'),
+            go.Bar(name='Active', x=['Goals'], y=[active_goals_org], marker_color='#f59e0b')
+        ])
+        fig_goals.update_layout(
+            title="Organization Goals Overview",
+            barmode='group',
+            height=350,
+            showlegend=True
+        )
+        st.plotly_chart(fig_goals, use_container_width=True)
+
+    st.markdown("---")
     # Tabs for different views
-    tab1, tab2, tab3, tab4 = st.tabs(["👥 All Users", "📊 Department Stats", "🎯 Goal Summary", "💬 Feedback Summary"])
+    tab1, tab2, tab3, tab4 = st.tabs(["👥 All Users", " Department Stats", "🎯 Goal Summary", "💬 Feedback Summary"])
     
     with tab1:
         st.subheader("All Users in System")
@@ -3933,20 +6992,18 @@ def display_hr_info():
                 'Total Goals': stats.get('total_goals', 0),
                 'Completed': stats.get('completed_goals', 0),
                 'Progress %': f"{stats.get('avg_progress', 0):.1f}%",
-                'User_ID': u['id']  # ✅ Changed from 'User ID' to 'User_ID'
+                'User_ID': u['id']
             })
         
         df_users = pd.DataFrame(users_data)
         
         # Display without User_ID column
-        display_df = df_users.drop('User_ID', axis=1)  # ✅ Fixed: Use 'User_ID' instead of 'User ID'
+        display_df = df_users.drop('User_ID', axis=1)
         st.dataframe(display_df, use_container_width=True, height=500)
         
         # Delete User option - only show deletable users based on hierarchy
         st.markdown("---")
         st.subheader("⚠️ Delete User")
-        
-        
         
         # Get deletable users based on current user's role
         deletable_users = [u for u in all_users 
@@ -3992,13 +7049,12 @@ def display_hr_info():
         else:
             st.info("No users available for deletion based on your permissions")
 
-    
     with tab2:
         st.subheader("Department-wise Statistics")
         
         dept_stats = {}
         for u in all_users:
-            dept = u.get('department', 'Unassigned')
+            dept = normalize_department(u.get('department'))
             if dept not in dept_stats:
                 dept_stats[dept] = {'users': 0, 'goals': 0, 'completed': 0}
             dept_stats[dept]['users'] += 1
@@ -4022,25 +7078,147 @@ def display_hr_info():
     with tab3:
         st.subheader("Goal Summary")
         
-        all_goals = []
-        for u in all_users:
-            all_goals.extend(db.get_user_all_goals(u['id']))
+        # Add filter options
+        col_filter1, col_filter2 = st.columns(2)
         
-        # Status breakdown
+        with col_filter1:
+            filter_type = st.selectbox(
+                "Filter by:",
+                ["All Users", "Specific User", "By Department"],
+                key="goal_summary_filter"
+            )
+        
+        # ✅ FIXED: Define all_goals BEFORE using it
+        all_goals = []
+        selected_user_obj = None
+        selected_dept = None
+        dept_users = []
+        
+        # Get goals based on filter
+        if filter_type == "All Users":
+            for u in all_users:
+                all_goals.extend(db.get_user_all_goals(u['id']))
+        
+        elif filter_type == "Specific User":
+            with col_filter2:
+                selected_user = st.selectbox(
+                    "Select User:",
+                    [f"{u['name']} ({u['role']}) - {u['email']}" for u in all_users],
+                    key="goal_summary_user"
+                )
+            
+            user_email = selected_user.split(' - ')[1]
+            selected_user_obj = next(u for u in all_users if u['email'] == user_email)
+            all_goals = db.get_user_all_goals(selected_user_obj['id'])
+        
+        else:  # By Department
+            with col_filter2:
+                departments = list(set([u.get('department', 'N/A') for u in all_users]))
+                departments = sorted([d for d in departments if d and d != 'N/A'])
+                selected_dept = st.selectbox(
+                    "Select Department:",
+                    departments,
+                    key="goal_summary_dept"
+                )
+            
+            # Get users from selected department
+            dept_users = [u for u in all_users if u.get('department') == selected_dept]
+            for u in dept_users:
+                all_goals.extend(db.get_user_all_goals(u['id']))
+        
+        # Display filter info
+        if filter_type == "All Users":
+            st.info(f" Showing goals for **all {len(all_users)} users**")
+        elif filter_type == "Specific User":
+            st.info(f" Showing goals for **{selected_user_obj['name']}** ({selected_user_obj['role']})")
+        else:
+            st.info(f" Showing goals for **{selected_dept}** department ({len(dept_users)} users)")
+
+        st.markdown("---")
+
+        # Status breakdown with clickable cards
         status_count = {}
         for goal in all_goals:
             status = goal.get('status', 'Active')
             status_count[status] = status_count.get(status, 0) + 1
         
         col_status1, col_status2, col_status3, col_status4 = st.columns(4)
+
         with col_status1:
-            st.metric("Active", status_count.get('Active', 0))
+            render_clickable_metric_card("Active", str(status_count.get('Active', 0)), "#3B82F6", "🔄", "hr_goal_active", 'hr_active')
+
         with col_status2:
-            st.metric("Completed", status_count.get('Completed', 0))
+            render_clickable_metric_card("Completed", str(status_count.get('Completed', 0)), "#10B981", "✅", "hr_goal_completed", 'hr_completed')
+
         with col_status3:
-            st.metric("On Hold", status_count.get('On Hold', 0))
+            render_clickable_metric_card("On Hold", str(status_count.get('On Hold', 0)), "#F59E0B", "⏸️", "hr_goal_onhold", 'hr_onhold')
+
         with col_status4:
-            st.metric("Cancelled", status_count.get('Cancelled', 0))
+            render_clickable_metric_card("Cancelled", str(status_count.get('Cancelled', 0)), "#EF4444", "❌", "hr_goal_cancelled", 'hr_cancelled')
+        
+        # Goal details modal
+        if st.session_state.get('show_details') and st.session_state.get('show_details').startswith('hr_'):
+            st.markdown("---")
+            detail_type = st.session_state.show_details
+            
+            col_header, col_close = st.columns([5, 1])
+            
+            with col_header:
+                status_map = {
+                    'hr_active': 'Active',
+                    'hr_completed': 'Completed',
+                    'hr_onhold': 'On Hold',
+                    'hr_cancelled': 'Cancelled'
+                }
+                status = status_map.get(detail_type, 'All')
+                st.subheader(f"📋 {status} Goals ({status_count.get(status, 0)})")
+            
+            with col_close:
+                if st.button("✕ Close", key="close_hr_goal_details"):
+                    del st.session_state.show_details
+                    st.rerun()
+            
+            # Filter goals by status
+            filtered_goals = [g for g in all_goals if g.get('status') == status]
+            
+            if filtered_goals:
+                goal_data = []
+                for goal in filtered_goals:
+                    # Get user info
+                    goal_user = db.get_user_by_id(goal['user_id'])
+                    user_name = goal_user['name'] if goal_user else 'Unknown'
+                    
+                    monthly_achievement = goal.get('monthly_achievement')
+                    monthly_target = goal.get('monthly_target', 1)
+                    achievement_value = 0 if monthly_achievement is None else monthly_achievement
+                    target_value = 1 if monthly_target is None or monthly_target == 0 else monthly_target
+                    progress = calculate_progress(achievement_value, target_value)
+                    
+                    goal_data.append({
+                        'Employee': user_name,
+                        'Goal Title': goal['goal_title'],
+                        'Department': goal.get('department', 'N/A'),
+                        'Target': monthly_target if monthly_target is not None else 0,
+                        'Achievement': monthly_achievement if monthly_achievement is not None else '-',
+                        'Progress': f"{progress:.1f}%",
+                        'Year': str(goal['year']),
+                        'Month': get_month_name(goal.get('month', 1))
+                    })
+                
+                df_goals = pd.DataFrame(goal_data)
+                st.dataframe(df_goals, use_container_width=True, height=400)
+                
+                st.download_button(
+                    "📥 Export to CSV",
+                    df_goals.to_csv(index=False).encode('utf-8'),
+                    f"hr_{status.lower()}_goals.csv",
+                    "text/csv",
+                    key='download_hr_goal_details'
+                )
+            else:
+                st.info(f"No {status} goals found")
+            
+            st.markdown("---")
         
         # Year-wise breakdown
         st.markdown("---")
@@ -4076,7 +7254,6 @@ def display_hr_info():
         st.subheader("Feedback Summary")
         
         # User filter
-        all_users = db.get_all_users()
         user_filter_options = ["All Users"] + [f"{u['name']} ({u['email']})" for u in all_users]
         selected_user_filter = st.selectbox("Filter by User", user_filter_options)
         
@@ -4093,10 +7270,7 @@ def display_hr_info():
         st.markdown(f"**Showing feedback for: {filter_display}**")
         st.markdown("---")
         
-        
-        
         # Average ratings
-        
         st.subheader("Average Ratings")
         
         if all_feedback:
@@ -4159,8 +7333,9 @@ def display_employees_page():
         view_title = "HR & Managers"
     elif role == 'HR':
         # HR sees only Manager cards
-        employees = [u for u in all_users if u['role'] == 'Manager']
-        view_title = "Managers"
+        employees = [u for u in all_users if u['role'] == 'Manager' or 
+                    (u['role'] == 'Employee' and normalize_department(u.get('department')) == 'HR')]
+        view_title = "Managers & HR Team"
     elif role == 'Manager':
         # Manager sees their team employees only
         employees = db.get_team_members(user['id'])
@@ -4173,26 +7348,28 @@ def display_employees_page():
         st.info("No employees found")
         return
     
-    st.title(f" {view_title}")
+    st.title(f"👥 {view_title}")
     
     # Assign Goal Section (for users who can modify)
     if role in ['CMD', 'VP', 'HR', 'Manager']:
         with st.expander("➕ Assign Goal to Employee"):
             display_quick_assign_goal_form(user, employees)
     
-    # Search and Filter
+    # Search and Filter for EMPLOYEES (not goals!)
     col1, col2 = st.columns([2, 1])
     with col1:
-        search = st.text_input(" Search by name or email", "")
+        search = st.text_input("🔍 Search by name or email", "")
     with col2:
-        filter_dept = st.selectbox("Filter by Department", ["All"] + list(set([e.get('department', 'N/A') for e in employees])))
+        # Get unique departments from employees
+        all_depts = list(set([normalize_department(e.get('department', '')) for e in employees if e.get('department')]))
+        filter_dept = st.selectbox("Filter by Department", ["All"] + sorted(all_depts))
     
-    # Filter employees
+    # Filter employees (not goals!)
     filtered_employees = employees
     if search:
         filtered_employees = [e for e in filtered_employees if search.lower() in e['name'].lower() or search.lower() in e['email'].lower()]
     if filter_dept != "All":
-        filtered_employees = [e for e in filtered_employees if e.get('department') == filter_dept]
+        filtered_employees = [e for e in filtered_employees if normalize_department(e.get('department', '')) == filter_dept]
     
     # Display employee cards
     st.markdown("---")
@@ -4210,11 +7387,11 @@ def display_employees_page():
                 'Employee': '#dbeafe'
             }
             role_color = role_colors.get(emp['role'], '#dbeafe')
-            
+
             st.markdown(f"""
             <div class='hierarchy-card'>
                 <div style='text-align: center;'>
-                    <div style='width: 60px; height: 60px; background: linear-gradient(135deg, #2DCCFF, #9BBCE0);
+                    <div style='width: 60px; height: 60px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                                 border-radius: 50%; margin: 0 auto 10px; display: flex; align-items: center; 
                                 justify-content: center; color: white; font-size: 24px; font-weight: bold;'>
                         {emp['name'][0].upper()}
@@ -4223,7 +7400,7 @@ def display_employees_page():
                     <p style='color: #64748b; font-size: 14px;'>{emp.get('designation', 'Employee')}</p>
                     <p style='color: #64748b; font-size: 12px;'>{emp.get('department', 'N/A')}</p>
                     <div style='margin-top: 10px;'>
-                        <span style='background: #dbeafe; color: #1e40af; padding: 3px 10px; 
+                        <span style='background: {role_color}; color: white; padding: 3px 10px; 
                                      border-radius: 10px; font-size: 11px; font-weight: bold;'>
                             {emp['role']}
                         </span>
@@ -4237,12 +7414,13 @@ def display_employees_page():
             
             # Determine button actions based on role and employee type
             if emp['role'] == 'VP':
-                # VP card - show their goals and team button
                 col_goals, col_team = st.columns(2)
                 with col_goals:
                     if st.button("📊", key=f"view_vp_goals_{emp['id']}_{idx}", use_container_width=True, help="View Goals"):
                         st.session_state.viewing_employee = emp
-                        st.session_state.page = 'employee_goals'
+                        st.session_state.viewing_employee_year = True
+                        st.session_state.selected_year = date.today().year
+                        st.session_state.page = 'employee_quarters'
                         st.rerun()
                 with col_team:
                     if st.button("👥", key=f"view_vp_team_{emp['id']}_{idx}", use_container_width=True, help="View Team"):
@@ -4256,7 +7434,9 @@ def display_employees_page():
                 with col_goals:
                     if st.button("📊", key=f"view_hr_goals_{emp['id']}_{idx}", use_container_width=True, help="View Goals"):
                         st.session_state.viewing_employee = emp
-                        st.session_state.page = 'employee_goals'
+                        st.session_state.viewing_employee_year = True
+                        st.session_state.selected_year = date.today().year
+                        st.session_state.page = 'employee_quarters'
                         st.rerun()
                 with col_team:
                     if st.button("👥", key=f"view_hr_team_{emp['id']}_{idx}", use_container_width=True, help="View Team"):
@@ -4270,7 +7450,9 @@ def display_employees_page():
                 with col_goals:
                     if st.button("📊", key=f"view_mgr_goals_{emp['id']}_{idx}", use_container_width=True, help="View Goals"):
                         st.session_state.viewing_employee = emp
-                        st.session_state.page = 'employee_goals'
+                        st.session_state.viewing_employee_year = True
+                        st.session_state.selected_year = date.today().year
+                        st.session_state.page = 'employee_quarters'
                         st.rerun()
                 with col_team:
                     if st.button("👥", key=f"view_mgr_team_{emp['id']}_{idx}", use_container_width=True, help="View Team"):
@@ -4282,7 +7464,16 @@ def display_employees_page():
                 # Employee card - only goals button
                 if st.button("👁️ View Goals", key=f"view_emp_{emp['id']}_{idx}", use_container_width=True):
                     st.session_state.viewing_employee = emp
-                    st.session_state.page = 'employee_goals'
+                    st.session_state.viewing_employee_year = True
+                    st.session_state.selected_year = date.today().year
+                    st.session_state.page = 'employee_quarters'
+                    st.rerun()
+                    
+                    # Get current year as default
+                    today = date.today()
+                    st.session_state.selected_year = today.year
+                    
+                    st.session_state.page = 'employee_quarters'  # ✅ GO DIRECTLY TO QUARTERS
                     st.rerun()
 
     
@@ -4472,7 +7663,7 @@ def display_vp_team_view():
             st.markdown(f"""
             <div class='hierarchy-card'>
                 <div style='text-align: center;'>
-                    <div style='width: 60px; height: 60px; background: linear-gradient(135deg, #2DCCFF, #9BBCE0);
+                    <div style='width: 60px; height: 60px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                                 border-radius: 50%; margin: 0 auto 10px; display: flex; align-items: center; 
                                 justify-content: center; color: white; font-size: 24px; font-weight: bold;'>
                         {emp['name'][0].upper()}
@@ -4495,7 +7686,9 @@ def display_vp_team_view():
             
             if st.button("👁️ View Goals", key=f"view_vp_emp_{emp['id']}_{idx}", use_container_width=True):
                 st.session_state.viewing_employee = emp
-                st.session_state.page = 'employee_goals'
+                st.session_state.viewing_employee_year = True
+                st.session_state.selected_year = date.today().year
+                st.session_state.page = 'employee_quarters'
                 st.rerun()
 
 
@@ -4540,7 +7733,7 @@ def display_hr_team_view():
             st.markdown(f"""
             <div class='hierarchy-card'>
                 <div style='text-align: center;'>
-                    <div style='width: 60px; height: 60px; background: linear-gradient(135deg, #2DCCFF, #9BBCE0);
+                    <div style='width: 60px; height: 60px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                                 border-radius: 50%; margin: 0 auto 10px; display: flex; align-items: center; 
                                 justify-content: center; color: white; font-size: 24px; font-weight: bold;'>
                         {emp['name'][0].upper()}
@@ -4563,7 +7756,9 @@ def display_hr_team_view():
             
             if st.button("👁️ View Goals", key=f"view_hr_emp_{emp['id']}_{idx}", use_container_width=True):
                 st.session_state.viewing_employee = emp
-                st.session_state.page = 'employee_goals'
+                st.session_state.viewing_employee_year = True
+                st.session_state.selected_year = date.today().year
+                st.session_state.page = 'employee_quarters'
                 st.rerun()
 
 
@@ -4608,7 +7803,7 @@ def display_manager_team_view():
             st.markdown(f"""
             <div class='hierarchy-card'>
                 <div style='text-align: center;'>
-                    <div style='width: 60px; height: 60px; background: linear-gradient(135deg, #2DCCFF, #9BBCE0);
+                    <div style='width: 60px; height: 60px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                                 border-radius: 50%; margin: 0 auto 10px; display: flex; align-items: center; 
                                 justify-content: center; color: white; font-size: 24px; font-weight: bold;'>
                         {emp['name'][0].upper()}
@@ -4631,7 +7826,9 @@ def display_manager_team_view():
             
             if st.button("👁️ View Goals", key=f"view_mgr_emp_{emp['id']}_{idx}", use_container_width=True):
                 st.session_state.viewing_employee = emp
-                st.session_state.page = 'employee_goals'
+                st.session_state.viewing_employee_year = True
+                st.session_state.selected_year = date.today().year
+                st.session_state.page = 'employee_quarters'
                 st.rerun()
 
 def display_quick_assign_goal_form(user, employees):
@@ -4759,7 +7956,38 @@ def display_quick_assign_goal_form(user, employees):
             else:
                 st.error("❌ Please fill all required fields")
 
+def get_organization_month_goals(month=None, year=None):
+    """Get all organization goals for a specific month"""
+    if month is None:
+        today = date.today()
+        month = today.month
+        year = today.year
+    
+    all_users = db.get_all_users()
+    month_goals = []
+    
+    for user in all_users:
+        user_goals = db.get_user_all_goals(user['id'])
+        for goal in user_goals:
+            if goal['year'] == year and goal.get('month') == month:
+                goal['user_name'] = user['name']
+                goal['user_role'] = user['role']
+                goal['user_department'] = user.get('department', 'N/A')
+                month_goals.append(goal)
+    
+    return month_goals
 
+def get_user_month_goals(user_id, month=None, year=None):
+    """Get user's goals for a specific month"""
+    if month is None:
+        today = date.today()
+        month = today.month
+        year = today.year
+    
+    all_goals = db.get_user_all_goals(user_id)
+    month_goals = [g for g in all_goals if g['year'] == year and g.get('month') == month]
+    
+    return month_goals
 
 # ============================================
 # EMPLOYEE GOALS VIEW
@@ -4775,11 +8003,11 @@ def display_employee_goals():
     
     col1, col2 = st.columns([1, 5])
     with col1:
-        if st.button("← Back to Employees"):
+        if st.button("← Back"):
             st.session_state.page = 'employees'
             st.rerun()
     with col2:
-        st.title(f"📊 {emp['name']}'s Goals")
+        st.title(f" {emp['name']}'s Goals")
     
     # Show year selection for this employee
     years = db.get_years(emp['id'])
@@ -4824,39 +8052,384 @@ def display_my_goals():
         st.session_state.page = 'login'
         st.rerun()
     role = user['role']
+    
     # Header with three-dot menu
     col_title, col_menu = st.columns([10, 1])
     with col_title:
         st.title(f" My Goals - {user['name']}")
-        st.markdown(f"""
-            <span style="color:#000000; font-size:0.85rem;">
-            {user.get('designation', 'Employee')} - {user['role']}
-            </span>
-            """,unsafe_allow_html=True)
+        st.caption(f"{user.get('designation', 'Employee')} • {user['role']}")
 
-    
     with col_menu:
         # Three-dot menu using popover
         with st.popover("⋮", use_container_width=True):
             if st.button(" View All Goals", use_container_width=True, key="view_all_goals_menu"):
                 st.session_state.page = 'view_all_goals'
                 st.rerun()
+            
+            # Show Create/Delete Year options ONLY for HR
+            if role == 'HR':
+                st.markdown("---")
+                if st.button("➕ Create New Year", use_container_width=True, key="create_year_menu"):
+                    st.session_state.creating_new_year = True
+                    st.rerun()
+                
+                if st.button("🗑️ Delete Year", use_container_width=True, key="delete_year_menu"):
+                    st.session_state.show_delete_year_selector = True
+                    st.rerun()
+        
+        
     
-    # Month Quick Search
+    # Get years data
+    years = db.get_years(user['id'])
+    current_year = datetime.now().year
+    if current_year not in years:
+        years[current_year] = ""
+
+
+    # Add this after the title/caption and before year selection
+    if role in ['HR', 'CMD', 'VP']:
+        st.markdown("---")
+        st.markdown("### 👤 Your Personal Performance")
+        
+        # Add month filter
+        col_perf_title, col_perf_filter = st.columns([3, 1])
+        with col_perf_title:
+            st.caption("Filter your personal goals by month")
+        with col_perf_filter:
+            today = date.today()
+            current_year = today.year
+            personal_filter_month = st.selectbox(
+                "Month",
+                list(range(1, 13)),
+                index=today.month - 1,
+                format_func=lambda x: get_month_name(x),
+                key="personal_perf_month_filter"
+            )
+        
+        st.caption(f"**Your Performance: {get_month_name(personal_filter_month)} {current_year}**")
+        
+        personal_goals = get_user_month_goals(user['id'], personal_filter_month, current_year)
+            
+        # Calculate personal metrics
+        personal_total = len(personal_goals)
+        personal_completed = len([g for g in personal_goals if g.get('status') == 'Completed'])
+        personal_active = len([g for g in personal_goals if g.get('status') == 'Active'])
+        
+        # Calculate average progress
+        total_progress = 0
+        goals_with_progress = 0
+        for goal in personal_goals:
+            monthly_achievement = goal.get('monthly_achievement')
+            if monthly_achievement is not None:
+                monthly_target = goal.get('monthly_target', 1)
+                if monthly_target > 0:
+                    progress = (monthly_achievement / monthly_target * 100)
+                    total_progress += progress
+                    goals_with_progress += 1
+        
+        personal_avg_progress = (total_progress / goals_with_progress) if goals_with_progress > 0 else 0
+        
+        # Count overdue goals
+        personal_overdue = 0
+        today_date = date.today()
+        for goal in personal_goals:
+            if goal.get('status') == 'Active':
+                end_date_str = goal.get('end_date')
+                if end_date_str:
+                    try:
+                        end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                        if today_date > end_date:
+                            personal_overdue += 1
+                    except:
+                        pass
+        
+        # Display clickable metric cards
+        col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns(5)
+        
+        # ================= MY GOALS – PERSONAL METRICS =================
+
+# -------- col_p1 : Total Goals --------
+        with col_p1:
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px rgba(59,130,246,0.25);
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;"></div>
+                    <div style="font-size:32px; font-weight:700; color:#3B82F6; margin-bottom:6px;">
+                        {personal_total}
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#3B82F6;
+                        padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Total Goals
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+
+        # -------- col_p2 : Completed --------
+        with col_p2:
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px rgba(16,185,129,0.22);
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;"></div>
+                    <div style="font-size:32px; font-weight:700; color:#10B981; margin-bottom:6px;">
+                        {personal_completed}
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#10B981;
+                        padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Completed
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+
+        # -------- col_p3 : Active --------
+        with col_p3:
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px rgba(245,87,108,0.23);
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;"></div>
+                    <div style="font-size:32px; font-weight:700; color:#F5576C; margin-bottom:6px;">
+                        {personal_active}
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#F5576C;
+                        padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Active
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+
+        # -------- col_p4 : Avg Progress --------
+        with col_p4:
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px rgba(0,201,255,0.23);
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;"></div>
+                    <div style="font-size:32px; font-weight:700; color:#00C9FF; margin-bottom:6px;">
+                        {personal_avg_progress:.1f}%
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#00C9FF;
+                        padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Avg Progress
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+
+        # -------- col_p5 : Overdue (Conditional) --------
+        with col_p5:
+            overdue_color = "#EF4444" if personal_overdue > 0 else "#10B981"
+            label_bg = "#FEF2F2" if personal_overdue > 0 else "#ECFDF5"
+            glow = "rgba(239,68,68,0.23)" if personal_overdue > 0 else "rgba(16,185,129,0.23)"
+            icon = "" if personal_overdue > 0 else ""
+
+            st.markdown(
+                f"""
+                <div style="
+                    background:#FFFFFF;
+                    width:100%;
+                    height:160px;
+                    padding:20px;
+                    border-radius:10px;
+                    text-align:center;
+                    display:flex;
+                    flex-direction:column;
+                    justify-content:center;
+                    box-shadow:
+                        0 2px 4px rgba(0,0,0,0.08),
+                        0 0 18px {glow};
+                ">
+                    <div style="font-size:36px; margin-bottom:10px;">{icon}</div>
+                    <div style="font-size:32px; font-weight:700; color:{overdue_color}; margin-bottom:6px;">
+                        {personal_overdue}
+                    </div>
+                    <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:{overdue_color};
+                        background:{label_bg}; padding:4px 10px; border-radius:6px; display:inline-block;">
+                        Overdue
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+        
+        # Personal details modal (similar to dashboard)
+        if st.session_state.get('show_details') and st.session_state.get('show_details').startswith('my_goals_personal_'):
+            st.markdown("---")
+            detail_type = st.session_state.show_details
+            
+            col_header, col_close = st.columns([5, 1])
+            
+            with col_header:
+                if detail_type == 'my_goals_personal_total':
+                    st.subheader(f" Your Goals ({personal_total}) - {get_month_name(personal_filter_month)} {current_year}")
+                elif detail_type == 'my_goals_personal_completed':
+                    st.subheader(f" Your Completed Goals ({personal_completed}) - {get_month_name(personal_filter_month)} {current_year}")
+                elif detail_type == 'my_goals_personal_active':
+                    st.subheader(f"🔄 Your Active Goals ({personal_active}) - {get_month_name(personal_filter_month)} {current_year}")
+                elif detail_type == 'my_goals_personal_progress':
+                    st.subheader(f"📈 Your Progress Breakdown - {get_month_name(personal_filter_month)} {current_year}")
+                elif detail_type == 'my_goals_personal_overdue':
+                    st.subheader(f"🚨 Your Overdue Goals ({personal_overdue}) - {get_month_name(personal_filter_month)} {current_year}")
+            
+            with col_close:
+                if st.button("✕ Close", key="close_my_goals_personal_details"):
+                    del st.session_state.show_details
+                    st.rerun()
+            
+            # Filter goals
+            if detail_type == 'my_goals_personal_completed':
+                display_goals = [g for g in personal_goals if g.get('status') == 'Completed']
+            elif detail_type == 'my_goals_personal_active':
+                display_goals = [g for g in personal_goals if g.get('status') == 'Active']
+            elif detail_type == 'my_goals_personal_overdue':
+                display_goals = []
+                for goal in personal_goals:
+                    if goal.get('status') == 'Active':
+                        end_date_str = goal.get('end_date')
+                        if end_date_str:
+                            try:
+                                end_date = datetime.strptime(str(end_date_str), '%Y-%m-%d').date()
+                                if today_date > end_date:
+                                    display_goals.append(goal)
+                            except:
+                                pass
+            elif detail_type == 'my_goals_personal_progress':
+                display_goals = personal_goals.copy()
+                for g in display_goals:
+                    achievement = g.get('monthly_achievement')
+                    target = g.get('monthly_target', 1)
+                    achievement_val = 0 if achievement is None else achievement
+                    target_val = 1 if target is None or target == 0 else target
+                    g['_progress'] = calculate_progress(achievement_val, target_val)
+                display_goals.sort(key=lambda x: x['_progress'], reverse=True)
+            else:
+                display_goals = personal_goals
+            
+            # Display goals table
+            if display_goals:
+                goal_data = []
+                for goal in display_goals:
+                    monthly_achievement = goal.get('monthly_achievement')
+                    monthly_target = goal.get('monthly_target', 1)
+                    achievement_value = 0 if monthly_achievement is None else monthly_achievement
+                    target_value = 1 if monthly_target is None or monthly_target == 0 else monthly_target
+                    progress = calculate_progress(achievement_value, target_value)
+                    
+                    goal_data.append({
+                        'Goal Title': goal['goal_title'],
+                        'Department': goal.get('department', 'N/A'),
+                        'KPI': goal.get('kpi', 'N/A'),
+                        'Month': get_month_name(goal.get('month', 1)),  # ADD THIS
+                        'Year': str(goal['year']), # ADD THIS
+                        'Target': monthly_target if monthly_target is not None else 0,
+                        'Achievement': monthly_achievement if monthly_achievement is not None else '-',
+                        'Progress': f"{progress:.1f}%",
+                        'Status': goal.get('status', 'Active')
+                    })
+                
+                df_goals = pd.DataFrame(goal_data)
+                st.dataframe(df_goals, use_container_width=True, height=400)
+                
+                st.download_button(
+                    "📥 Export to CSV",
+                    df_goals.to_csv(index=False).encode('utf-8'),
+                    f"my_goals_personal_{detail_type}_{personal_filter_month}_{current_year}.csv",
+                    "text/csv",
+                    key='download_my_goals_personal_modal_details'
+                )
+            else:
+                st.info("No goals found in this category")
+            
+            st.markdown("---")
+        
+        st.markdown("---")
+    # Month Quick Search and Year Browser - Side by Side
+    col_search1, col_search2 = st.columns(2)
     
-    st.subheader(" Quick Search by Month")
-    
-    col_search1, col_search2 = st.columns([2, 1])
     with col_search1:
         search_month = st.selectbox(
-            "Select Month to View Across All Years",
+            " Quick Search by Month",
             ["None"] + [get_month_name(i) for i in range(1, 13)]
         )
     
+    with col_search2:
+        sorted_years = sorted(years.keys(), reverse=True) if years else []
+        if sorted_years:
+            selected_year = st.selectbox(
+                " Browse by Year",
+                sorted_years,
+                key="my_goals_year_select_top"
+            )
+        else:
+            selected_year = None
+    st.markdown("---")
+    # If month search is active
     if search_month != "None":
         month_num = [get_month_name(i) for i in range(1, 13)].index(search_month) + 1
         
-        st.subheader(f" {search_month} Goals Across All Years")
+        st.markdown("---")
+        st.markdown(f"### 📅 {search_month} Goals ")
         
         all_goals = db.get_user_all_goals(user['id'])
         month_goals = [g for g in all_goals if g.get('month') == month_num]
@@ -4871,7 +8444,7 @@ def display_my_goals():
                 year_groups[year].append(goal)
             
             for year in sorted(year_groups.keys(), reverse=True):
-                with st.expander(f" {search_month} {year} ({len(year_groups[year])} goals)"):
+                with st.expander(f"📅 {search_month} {year} ({len(year_groups[year])} goals)"):
                     for goal in year_groups[year]:
                         progress = calculate_progress(
                             goal.get('monthly_achievement', 0),
@@ -4881,7 +8454,7 @@ def display_my_goals():
                         col1, col2, col3 = st.columns([2, 1, 1])
                         with col1:
                             st.markdown(f"**{goal['goal_title']}**")
-                            st.caption(f"Vertical: {goal.get('vertical', 'N/A')} | KPI: {goal.get('kpi', 'N/A')}")
+                            st.caption(f"Department: {goal.get('department', 'N/A')} | KPI: {goal.get('kpi', 'N/A')}")
                         with col2:
                             st.metric("Target", goal.get('monthly_target', 0))
                         with col3:
@@ -4900,22 +8473,15 @@ def display_my_goals():
         
         st.markdown("---")
     
-    # Regular year display
-    # Regular year display
-    years = db.get_years(user['id'])
-    current_year = datetime.now().year
-    if current_year not in years:
-        years[current_year] = ""
+    # If year is selected from top, show quarters directly
+    if selected_year:
+        st.session_state.selected_year = selected_year
+        display_quarter_selection()
+        return
+    
     st.markdown("---")
-    st.subheader(" Browse by Year")
     
     
-    # Add Create New Year button - Only for HR and Manager
-    if role in ['HR', 'Manager']:
-        col_header1, col_header2 = st.columns([3, 1])
-        with col_header2:
-            if st.button("➕ Create New Year", use_container_width=True, key="create_new_year_btn"):
-                st.session_state.creating_new_year = True
     
     # Show create year form if button clicked
     if st.session_state.get('creating_new_year'):
@@ -4948,56 +8514,50 @@ def display_my_goals():
                         st.rerun()
         st.markdown("---")
     
-    # Display years in rows with goal counts
-    sorted_years = sorted(years.items(), reverse=True)
-    for year, summary in sorted_years:
-        # Get goal count for this year
-        year_goals = [g for g in db.get_user_all_goals(user['id']) if g['year'] == year]
-        goal_count = len(year_goals)
+    # Show delete year selector and confirmation
+    if st.session_state.get('show_delete_year_selector'):
+        st.markdown("### 🗑️ Delete Year")
         
-        st.markdown(f"""
-        <div class='hierarchy-card' style='cursor: pointer;'>
-            <h2 style='margin:0;'> {year} <span style='color: #64748b; font-size: 16px;'>({goal_count} goals)</span></h2>
-            <p style='color: #64748b; margin-top: 8px;'>{summary[:80] if summary else 'Click to view quarters'}</p>
-        </div>
-        """, unsafe_allow_html=True)
+        delete_year = st.selectbox(
+            "Select Year to Delete",
+            sorted_years,
+            key="delete_year_select"
+        )
         
-        # Show centered view button for Employee, CMD, VP
-        if role in ['Employee', 'CMD', 'VP']:
-            if st.button(f"View {year}", key=f"year_view_{year}", use_container_width=True):
-                st.session_state.selected_year = year
-                st.session_state.page = 'quarters'
-                st.rerun()
-        
-        else:
-            # HR and Manager get edit/delete options
-            col_btn1, col_btn2, col_btn3 = st.columns([2, 1, 1])
+        if delete_year:
+            st.warning(f"⚠️ Are you sure you want to delete year **{delete_year}**?")
+            st.error("This will delete ALL goals and data for this year. This action cannot be undone!")
             
-            with col_btn1:
-                if st.button(f"View {year}", key=f"year_view_{year}", use_container_width=True):
-                    st.session_state.selected_year = year
-                    st.session_state.page = 'quarters'
-                    st.rerun()
+            # Show year stats
+            year_goals = [g for g in db.get_user_all_goals(user['id']) if g['year'] == delete_year]
+            st.info(f" This year has **{len(year_goals)} goal(s)** that will be deleted.")
             
-            with col_btn2:
-                if st.button("✏️ Edit", key=f"year_edit_{year}", use_container_width=True):
-                    st.session_state.editing_year = year
-                    st.session_state.editing_year_summary = summary
+            confirm_delete = st.checkbox("I understand this action cannot be undone", key="confirm_year_delete")
             
-            with col_btn3:
-                if st.button("🗑️ Delete", key=f"year_del_{year}", use_container_width=True):
-                    if db.delete_year(user['id'], year):
-                        st.success(f"Year {year} deleted!")
+            col_del1, col_del2, col_del3 = st.columns([1, 1, 1])
+            
+            with col_del2:
+                if st.button("🗑️ Delete Year", disabled=not confirm_delete, use_container_width=True, type="primary"):
+                    if db.delete_year(user['id'], delete_year):
+                        st.success(f"✅ Year {delete_year} deleted!")
+                        st.session_state.show_delete_year_selector = False
                         st.rerun()
+                    else:
+                        st.error("❌ Failed to delete year")
+            
+            with col_del3:
+                if st.button("❌ Cancel", use_container_width=True):
+                    st.session_state.show_delete_year_selector = False
+                    st.rerun()
         
-        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("---")
     
+    # Show rejected goals for employees
     if user['role'] == 'Employee':
         all_user_goals = db.get_user_all_goals(user['id'])
         rejected_goals = [g for g in all_user_goals if g.get('approval_status') == 'rejected']
         
         if rejected_goals:
-            st.markdown("---")
             st.error(f"⚠️ You have {len(rejected_goals)} rejected goal(s)")
             
             with st.expander("View Rejected Goals"):
@@ -5007,13 +8567,18 @@ def display_my_goals():
                     st.warning(f"**Reason:** {goal.get('rejection_reason', 'No reason provided')}")
                     
                     if st.button(f"Revise & Resubmit", key=f"revise_{goal['goal_id']}"):
-                        # Allow editing and resubmit
                         st.session_state.revising_goal = goal
                         st.rerun()
                     
                     st.markdown("---")
-    # Rest of the existing code for edit year and add new year
-    # ...
+            
+            st.markdown("---")
+    
+    # If no year selected, show message
+    if not sorted_years:
+        st.info(" No years found. Create a new year to get started.")
+    else:
+        st.info(" Please select a year from the dropdown above to view your goals.")
 
 # ============================================
 # QUARTER SELECTION PAGE (UPDATED WITH GOAL COUNT)
@@ -5028,34 +8593,31 @@ def display_quarter_selection():
         st.session_state.page = 'my_goals'
         st.rerun()
     
-    # Check if viewing employee goals
+    # Determine user_id first
     if st.session_state.get('viewing_employee_year'):
-        # ✅ Safety check for employee
         if not st.session_state.get('viewing_employee'):
             st.warning("⚠️ Employee data lost. Returning to employees page...")
             st.session_state.page = 'employees'
             st.rerun()
         emp = st.session_state.viewing_employee
+        user_id = emp['id']
         
-        # Check if viewing a Manager's goals
+        # ✅ SINGLE HEADER WITH BACK BUTTON
         if emp['role'] == 'Manager':
-            # Show header with team dropdown
             col1, col2, col_menu = st.columns([1, 7, 1])
             with col1:
-                if st.button("← Back"):
+                if st.button("← Back "):
                     st.session_state.viewing_employee_year = False
-                    st.session_state.page = 'employee_goals'
+                    st.session_state.pop('viewing_employee', None)
+                    st.session_state.pop('selected_year', None)
+                    st.session_state.page = 'employees'
                     st.rerun()
             with col2:
-                st.title(f"{emp['name']}'s Year {year} - Quarters")
+                st.title(f" {emp['name']}'s Year {year} - Quarters")
             with col_menu:
-                # Three-dot menu for team members
                 with st.popover("⋮", use_container_width=True):
                     st.markdown("**View Team Member:**")
-                    
-                    # Get team members under this manager
                     team_members = db.get_team_members(emp['id'])
-                    
                     if team_members:
                         for member in team_members:
                             if st.button(
@@ -5063,44 +8625,71 @@ def display_quarter_selection():
                                 key=f"switch_quarter_{member['id']}", 
                                 use_container_width=True
                             ):
-                                # Store current manager for back navigation
                                 st.session_state.previous_manager = emp
-                                # Switch to viewing this team member
                                 st.session_state.viewing_employee = member
                                 st.rerun()
                     else:
                         st.caption("No team members")
         else:
-            # Regular header
+            # Regular header for non-managers
             col1, col2 = st.columns([1, 5])
             with col1:
-                # Check if we came from a manager's view
                 if st.session_state.get('previous_manager'):
-                    if st.button("← Back to Manager"):
-                        # Go back to the manager's goal sheet
+                    if st.button("← Back "):
                         st.session_state.viewing_employee = st.session_state.previous_manager
                         st.session_state.pop('previous_manager', None)
                         st.rerun()
                 else:
-                    if st.button("← Back"):
+                    if st.button("← Back "):
                         st.session_state.viewing_employee_year = False
-                        st.session_state.page = 'employee_goals'
+                        st.session_state.pop('viewing_employee', None)
+                        st.session_state.pop('selected_year', None)
+                        st.session_state.page = 'employees'
                         st.rerun()
             with col2:
                 st.title(f" {emp['name']}'s Year {year} - Quarters")
         
-        user_id = emp['id']
+        # ✅ YEAR FILTER - ALWAYS SHOW
+        st.markdown("---")
+        years = db.get_years(user_id)
+        
+        if years:
+            col_year_filter, col_space = st.columns([1, 4])
+            with col_year_filter:
+                year_options = sorted(years.keys(), reverse=True)
+                
+                # Add current year if not in list
+                if year not in year_options:
+                    year_options = sorted([year] + year_options, reverse=True)
+                
+                selected_year_filter = st.selectbox(
+                    "📅 Filter by Year",
+                    year_options,
+                    index=year_options.index(year) if year in year_options else 0,
+                    key="employee_year_filter"
+                )
+                
+                if selected_year_filter != year:
+                    st.session_state.selected_year = selected_year_filter
+                    st.rerun()
+        else:
+            # If no years found, still show current year option
+            col_year_filter, col_space = st.columns([1, 4])
+            with col_year_filter:
+                st.selectbox(
+                    "📅 Filter by Year",
+                    [year],
+                    index=0,
+                    key="employee_year_filter_single",
+                    disabled=True
+                )
+        
     else:
-        col1, col2 = st.columns([1, 5])
-        with col1:
-            if st.button("← Back to Years"):
-                st.session_state.page = 'my_goals'
-                st.rerun()
-        with col2:
-            st.title(f" Year {year} - Quarters")
+        # User viewing their own goals
+        st.title(f" Year {year} - Quarters")
         user_id = user['id']
-
     
+    # ✅ REST OF THE FUNCTION CONTINUES HERE
     quarters = db.get_quarters(user_id, year)
     for q in [1, 2, 3, 4]:
         if q not in quarters:
@@ -5109,7 +8698,6 @@ def display_quarter_selection():
     cols = st.columns(2)
     for idx, (quarter, summary) in enumerate(sorted(quarters.items())):
         with cols[idx % 2]:
-            # Get goal count for this quarter
             quarter_goals = [g for g in db.get_user_all_goals(user_id) if g['year'] == year and g.get('quarter') == quarter]
             goal_count = len(quarter_goals)
             
@@ -5164,8 +8752,8 @@ def display_month_selection():
             # Show header with team dropdown
             col1, col2, col_menu = st.columns([1, 7, 1])
             with col1:
-                if st.button("← Back to Quarters"):
-                    st.session_state.page = 'employee_quarters'
+                if st.button("← Back "):
+                    st.session_state.page = 'employee_quarters'  # ✅ GO BACK TO QUARTERS
                     st.rerun()
             with col2:
                 st.title(f"📅 {emp['name']}'s Year {year} - Q{quarter} - Months")
@@ -5192,19 +8780,19 @@ def display_month_selection():
                     else:
                         st.caption("No team members")
         else:
-            # Regular header
+            # Regular header for non-managers
             col1, col2 = st.columns([1, 5])
             with col1:
                 # Check if we came from a manager's view
                 if st.session_state.get('previous_manager'):
-                    if st.button("← Back to Manager"):
+                    if st.button("← Back "):
                         # Go back to the manager's goal sheet
                         st.session_state.viewing_employee = st.session_state.previous_manager
                         st.session_state.pop('previous_manager', None)
                         st.rerun()
                 else:
-                    if st.button("← Back to Quarters"):
-                        st.session_state.page = 'employee_quarters'
+                    if st.button("← Back "):
+                        st.session_state.page = 'employee_quarters'  # ✅ GO BACK TO QUARTERS
                         st.rerun()
             with col2:
                 st.title(f"📅 {emp['name']}'s Year {year} - Q{quarter} - Months")
@@ -5213,7 +8801,7 @@ def display_month_selection():
     else:
         col1, col2 = st.columns([1, 5])
         with col1:
-            if st.button("← Back to Quarters"):
+            if st.button("← Back "):
                 st.session_state.page = 'quarters'
                 st.rerun()
         with col2:
@@ -5285,8 +8873,10 @@ def display_month_goals():
         
         # HR can only edit their own team members
         if user['role'] == 'HR':
-            if viewing_employee.get('manager_id') != user['id']:
+            if viewing_employee_role == 'CMD':
                 is_read_only = True
+            else:
+                is_read_only = False 
                 
         # Manager can only edit their team members (already handled by employees page access)
         elif user['role'] == 'Manager':
@@ -5316,8 +8906,8 @@ def display_month_goals():
             # Show header with team dropdown
             col1, col2, col_menu = st.columns([1, 7, 1])
             with col1:
-                if st.button("← Back to Months"):
-                    st.session_state.page = 'employee_months'
+                if st.button("← Back"):
+                    st.session_state.page = 'employee_months'  # ✅ GO BACK TO MONTH SELECTION
                     st.rerun()
             with col2:
                 st.title(f" {viewing_employee['name']}'s {month_name} {year} Goals")
@@ -5349,13 +8939,13 @@ def display_month_goals():
             with col1:
                 # Check if we came from a manager's view
                 if st.session_state.get('previous_manager'):
-                    if st.button("← Back to Manager"):
+                    if st.button("← Back"):
                         # Go back to the manager's goal sheet
                         st.session_state.viewing_employee = st.session_state.previous_manager
                         st.session_state.pop('previous_manager', None)
                         st.rerun()
                 else:
-                    if st.button("← Back to Months"):
+                    if st.button("← Back"):
                         st.session_state.page = 'employee_months'
                         st.rerun()
             with col2:
@@ -5366,7 +8956,7 @@ def display_month_goals():
         # User viewing their own goals
         col1, col2 = st.columns([1, 5])
         with col1:
-            if st.button("← Back to Months"):
+            if st.button("← Back"):
                 st.session_state.page = 'months'
                 st.rerun()
         with col2:
@@ -5469,24 +9059,15 @@ def export_goals_to_excel(user_id, year, quarter, month):
     ws.merge_cells(start_row=1, start_column=current_col, end_row=2, end_column=current_col)
     current_col += 1
     
-    # Weekly ratings (instead of remarks)
-    for week in range(1, 5):
-        rating_value = goal.get(f'week{week}_rating', 0)
-        cell = ws.cell(row=row_num, column=col_num, value=rating_value)
-        cell.border = border
-        cell.alignment = Alignment(wrap_text=True, vertical="top")
-        
-        # Color based on rating
-        if rating_value == 1:
-            cell.fill = PatternFill(start_color="FFCCCB", end_color="FFCCCB", fill_type="solid")  # Light red
-        elif rating_value == 2:
-            cell.fill = PatternFill(start_color="FFD580", end_color="FFD580", fill_type="solid")  # Light amber
-        elif rating_value == 3:
-            cell.fill = PatternFill(start_color="FFFFE0", end_color="FFFFE0", fill_type="solid")  # Light yellow
-        elif rating_value == 4:
-            cell.fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")  # Light green
-        
-        col_num += 1
+    # Add "Rating" merged header
+    ws.merge_cells(start_row=1, start_column=current_col, end_row=1, end_column=current_col + 3)
+    cell = ws.cell(row=1, column=current_col)
+    cell.value = "Rating"
+    cell.fill = header_fill
+    cell.font = header_font
+    cell.alignment = center_align
+    cell.border = border
+    current_col += 4
     
     # Row 2: Week subheaders
     current_col = 7  # Start after main headers
@@ -5514,7 +9095,7 @@ def export_goals_to_excel(user_id, year, quarter, month):
     # Skip Monthly Achievement column (already merged)
     current_col += 1
     
-    # Week numbers under "Remarks"
+    # Week numbers under "Rating"
     for week in weekly_headers:
         cell = ws.cell(row=2, column=current_col)
         cell.value = week
@@ -5555,7 +9136,6 @@ def export_goals_to_excel(user_id, year, quarter, month):
             col_num += 1
         
         # Weekly achievements
-        # Weekly achievements
         for week in range(1, 5):
             achievement_val = goal.get(f'week{week}_achievement')
             cell_value = achievement_val if achievement_val is not None else '-'
@@ -5569,20 +9149,30 @@ def export_goals_to_excel(user_id, year, quarter, month):
         cell.font = Font(bold=True)
         cell.fill = PatternFill(start_color="D4EDDA", end_color="D4EDDA", fill_type="solid")
         col_num += 1
-                
         
-        
-        # Weekly remarks
+        # ✅ FIX: Weekly ratings INSIDE the goal loop
         for week in range(1, 5):
-            cell = ws.cell(row=row_num, column=col_num, value=goal.get(f'week{week}_remarks', ''))
+            rating_value = goal.get(f'week{week}_rating', 0)
+            cell = ws.cell(row=row_num, column=col_num, value=rating_value)
             cell.border = border
             cell.alignment = Alignment(wrap_text=True, vertical="top")
+            
+            # Color based on rating
+            if rating_value == 1:
+                cell.fill = PatternFill(start_color="FFCCCB", end_color="FFCCCB", fill_type="solid")  # Light red
+            elif rating_value == 2:
+                cell.fill = PatternFill(start_color="FFD580", end_color="FFD580", fill_type="solid")  # Light amber
+            elif rating_value == 3:
+                cell.fill = PatternFill(start_color="FFFFE0", end_color="FFFFE0", fill_type="solid")  # Light yellow
+            elif rating_value == 4:
+                cell.fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")  # Light green
+            
             col_num += 1
         
         row_num += 1
     
     # Adjust column widths
-    ws.column_dimensions['A'].width = 15  # Vertical
+    ws.column_dimensions['A'].width = 15  # Department
     ws.column_dimensions['B'].width = 30  # Goal Title
     ws.column_dimensions['C'].width = 15  # KPI
     ws.column_dimensions['D'].width = 15  # Monthly Target
@@ -5596,7 +9186,7 @@ def export_goals_to_excel(user_id, year, quarter, month):
     # Monthly Achievement column
     ws.column_dimensions['O'].width = 15
     
-    # Remarks columns (wider)
+    # Rating columns
     for col in range(16, 20):
         ws.column_dimensions[chr(64 + col)].width = 12
     
@@ -5606,11 +9196,49 @@ def export_goals_to_excel(user_id, year, quarter, month):
     output.seek(0)
     
     return output
+
+def check_and_auto_complete_goal(goal_id):
+    """Check if goal should be auto-completed based on monthly achievement"""
+    goal = db.get_goal_by_id(goal_id)
+    
+    if not goal or goal.get('status') != 'Active':
+        return False
+    
+    monthly_achievement = goal.get('monthly_achievement')
+    monthly_target = goal.get('monthly_target', 0)
+    
+    if monthly_achievement is None or monthly_target == 0:
+        return False
+    
+    # Check if monthly target is achieved (100% or more)
+    progress = (monthly_achievement / monthly_target * 100) if monthly_target > 0 else 0
+    
+    if progress >= 100:
+        # Auto-complete the goal
+        updates = {
+            'status': 'Completed',
+            'completed_at': datetime.now(IST).isoformat(),
+            'completion_remarks': 'Auto-completed: Monthly target achieved'
+        }
+        
+        result = db.update_goal(goal_id, updates)
+        
+        if result:
+            # Get user info for notification
+            user = db.get_user_by_id(goal['user_id'])
+            if user:
+                notify_goal_completed(goal, user)
+        
+        return result
+    
+    return False
+
 # ============================================
 # MONTHLY VIEW (WITH ASSIGN GOAL)
 # ============================================
 def display_monthly_view(user, year, quarter, month, is_read_only=False):
     """Display monthly goals view with Excel-like format and assign goal option"""
+    
     # Don't show any title - just the content
     if st.session_state.get('show_create_goal_form'):
         if not st.session_state.get('viewing_employee_year') or not is_read_only:
@@ -6427,62 +10055,81 @@ def display_monthly_view(user, year, quarter, month, is_read_only=False):
                                             key="w4_rating_update",
                                             help="1=Poor (Red), 2=Fair (Amber), 3=Good (Yellow), 4=Excellent (Green)")
                 
+
                 if st.button("💾 Save Achievements", use_container_width=True, key="save_achievements"):
-                    updates = {
-                        'week1_achievement': w1,
-                        'week2_achievement': w2,
-                        'week3_achievement': w3,
-                        'week4_achievement': w4,
-                        'monthly_achievement': total_monthly if total_monthly > 0 else None,
-                        'week1_rating': w1_rating,
-                        'week2_rating': w2_rating,
-                        'week3_rating': w3_rating,
-                        'week4_rating': w4_rating
-                    }
+                    # Determine which week was updated FIRST (before any DB operations)
+                    updated_week = 0
+                    if w4 is not None:
+                        updated_week = 4
+                    elif w3 is not None:
+                        updated_week = 3
+                    elif w2 is not None:
+                        updated_week = 2
+                    elif w1 is not None:
+                        updated_week = 1
                     
-                    if db.update_goal(selected_goal['goal_id'], updates):
-                        st.success("✅ Achievements and ratings saved to monthly goal sheet!")
-                        st.info("💡 Ratings are now available in the respective week views")
+                    if user['role'] == 'Employee':
+                        updates = {
+                            'week1_achievement_pending': w1,
+                            'week2_achievement_pending': w2,
+                            'week3_achievement_pending': w3,
+                            'week4_achievement_pending': w4,
+                            'monthly_achievement_pending': total_monthly if total_monthly > 0 else None,
+                            'week1_rating_pending': w1_rating,
+                            'week2_rating_pending': w2_rating,
+                            'week3_rating_pending': w3_rating,
+                            'week4_rating_pending': w4_rating,
+                            'achievement_approval_status': 'pending',
+                            'achievement_updated_at': datetime.now(IST).isoformat()
+                        }
                         
-                        # Determine which week was updated (find the last non-None week)
-                        updated_week = 0
-                        if w4 is not None:
-                            updated_week = 4
-                        elif w3 is not None:
-                            updated_week = 3
-                        elif w2 is not None:
-                            updated_week = 2
-                        elif w1 is not None:
-                            updated_week = 1
-
-                        if updated_week > 0:
-                            notify_weekly_achievement_updated(selected_goal, user, updated_week)
-
-                        # ✅ CHECK IF GOAL IS COMPLETED
-                        if total_monthly >= selected_goal.get('monthly_target', 1):
-                            # Mark goal as completed
-                            db.update_goal(selected_goal['goal_id'], {'status': 'Completed'})
-                            
-                            # Notify about completion
-                            notify_goal_completed(selected_goal, user)
+                        if db.update_goal(selected_goal['goal_id'], updates):
+                            st.success("✅ Achievements submitted for manager approval!")
+                            st.info("💡 Your manager will review these achievements before they appear in the goal sheet")
                             
                             # Send email to manager
                             if user.get('manager_id'):
                                 manager = db.get_user_by_id(user['manager_id'])
                                 if manager and manager.get('email'):
-                                    from monthly_reminder import send_goal_completion_email
-                                    send_goal_completion_email(
+                                    send_achievement_approval_email(
                                         manager['email'],
                                         user['name'],
-                                        selected_goal_title,
-                                        completed=True
+                                        selected_goal,
+                                        {
+                                            'week1': w1,
+                                            'week2': w2,
+                                            'week3': w3,
+                                            'week4': w4,
+                                            'monthly': total_monthly
+                                        }
                                     )
-                                    st.success("📧 Manager notified about goal completion!")
-                        
-                        st.rerun()
+                                    st.success("📧 Approval request sent to your manager")
                     else:
-                        st.error("❌ Failed to save achievements")
+                        updates = {
+                            'week1_achievement': w1,
+                            'week2_achievement': w2,
+                            'week3_achievement': w3,
+                            'week4_achievement': w4,
+                            'monthly_achievement': total_monthly if total_monthly > 0 else None,
+                            'week1_rating': w1_rating,
+                            'week2_rating': w2_rating,
+                            'week3_rating': w3_rating,
+                            'week4_rating': w4_rating
+                        }
                         
+                        if db.update_goal(selected_goal['goal_id'], updates):
+                            st.success("✅ Achievements and ratings saved to monthly goal sheet!")
+                            if check_and_auto_complete_goal(selected_goal['goal_id']):
+                                st.success("🎉 Goal completed - Monthly target achieved!")
+                            st.info("💡 Ratings are now available in the respective week views")
+                            
+                            # Send notification if any week was updated
+                            if updated_week > 0:
+                                notify_weekly_achievement_updated(selected_goal, user, updated_week)
+                            
+                            st.rerun()
+                        else:
+                            st.error("❌ Failed to save achievements")
         # ===== EDIT GOAL TAB =====
         if not is_read_only and action_tab2:
             if action_tab2:
@@ -7362,7 +11009,7 @@ def display_add_goal_form(user, year, quarter, month):
                         'year': year,
                         'quarter': quarter,
                         'month': month,
-                        'department': department,
+                        'department': normalize_department(department),
                         'goal_title': title,
                         'goal_description': description,
                         'kpi': kpi,
@@ -7494,7 +11141,7 @@ def display_add_goal_form_inline(user, year, quarter, month):
                 st.rerun()
 
 def display_feedback_section(goals, level):
-    """Official Feedback only – Self Appraisal completely removed"""
+    """Display feedbacks with replies - Official feedback only"""
     if not goals:
         return
 
@@ -7506,7 +11153,7 @@ def display_feedback_section(goals, level):
         return
 
     target_role = target_user['role']
-    st.subheader("Feedback")
+    st.subheader("💬 Feedback & Replies")
 
     # Goal selector
     selected_goal_title = st.selectbox(
@@ -7531,11 +11178,11 @@ def display_feedback_section(goals, level):
         feedback_label = None
 
     # ──────────────────────────────────────────────
-    # 2. Show existing feedback – CORRECTED VERSION
+    # 2. Show existing feedback WITH REPLIES
     # ──────────────────────────────────────────────
     feedbacks = db.get_goal_feedback(selected_goal['goal_id'])
 
-
+    # Ensure feedback_by_name is populated
     for fb in feedbacks:
         if not fb.get('feedback_by_name'):
             feedback_by_id = fb.get('feedback_by')
@@ -7545,16 +11192,18 @@ def display_feedback_section(goals, level):
             else:
                 fb['feedback_by_name'] = 'Unknown'
 
-    # Always show Manager/VP/CMD feedback – even if the viewer can't give it
+    # Show only official feedbacks
     official_feedbacks = [f for f in feedbacks if f['feedback_type'] in (
         'CMD Feedback', 'VP Feedback', 'Manager Feedback'
     )]
 
     if official_feedbacks:
+        st.markdown("---")
+        
         for fb in official_feedbacks:
             label_to_show = fb['feedback_type']
             
-            # ✅ FIX: Get the actual feedback giver's name
+            # Get the actual feedback giver's name
             feedback_by_id = fb.get('feedback_by')
             feedback_giver = db.get_user_by_id(feedback_by_id) if feedback_by_id else None
             feedback_giver_name = fb.get('feedback_by_name', 'Unknown')
@@ -7570,6 +11219,7 @@ def display_feedback_section(goals, level):
                 except:
                     created_date = 'Unknown date'
             
+            # Main feedback container
             with st.container():
                 st.markdown(f"""
                 <div style="
@@ -7592,21 +11242,106 @@ def display_feedback_section(goals, level):
                     </p>
                 </div>
                 """, unsafe_allow_html=True)
+                
+                # ──────────────────────────────────────────────
+                # SHOW REPLIES SECTION
+                # ──────────────────────────────────────────────
+                replies = db.get_feedback_replies(fb.get('feedback_id'))
+                
+                if replies:
+                    st.markdown("**💬 Replies:**")
+                    for reply in replies:
+                        reply_by_name = reply.get('reply_by_name', 'Unknown')
+                        reply_text = reply.get('reply_text', '')
+                        reply_date = reply.get('created_at', '')
+                        
+                        # Format reply date
+                        if reply_date:
+                            try:
+                                if 'T' in reply_date:
+                                    reply_date = reply_date.split('T')[0]
+                                else:
+                                    reply_date = reply_date[:10]
+                            except:
+                                reply_date = ''
+                        
+                        st.markdown(f"""
+                        <div style="
+                            margin-left: 30px;
+                            background-color: #f0f9ff;
+                            border-left: 3px solid #60a5fa;
+                            padding: 12px;
+                            border-radius: 5px;
+                            margin-top: 8px;
+                        ">
+                            <p style="margin:0; color:#1f2937; font-size: 14px;">↳ {reply_text}</p>
+                            <p style="margin:8px 0 0 0; font-size:12px; color:#6b7280;">
+                                — {reply_by_name} • {reply_date}
+                            </p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                
+                # ──────────────────────────────────────────────
+                # REPLY BUTTON & FORM
+                # ──────────────────────────────────────────────
+                # Anyone can reply (employee can reply to manager's feedback, manager can reply back)
+                reply_key = f"reply_btn_{fb.get('feedback_id')}_{level}"
+                
+                if st.button("💬 Reply to this feedback", key=reply_key):
+                    st.session_state[f"replying_to_{fb.get('feedback_id')}_{level}"] = True
+                
+                # Reply Form
+                if st.session_state.get(f"replying_to_{fb.get('feedback_id')}_{level}"):
+                    with st.form(f"reply_form_{fb.get('feedback_id')}_{level}"):
+                        reply_text = st.text_area(
+                            "Your Reply*", 
+                            key=f"reply_text_{fb.get('feedback_id')}_{level}",
+                            height=100
+                        )
+                        
+                        col_reply1, col_reply2 = st.columns(2)
+                        with col_reply1:
+                            if st.form_submit_button("📤 Send Reply", use_container_width=True):
+                                if reply_text.strip():
+                                    reply_data = {
+                                        'feedback_id': fb.get('feedback_id'),
+                                        'reply_by': user['id'],
+                                        'reply_text': reply_text.strip()
+                                    }
+                                    if db.create_feedback_reply(reply_data):
+                                        # Notify the original feedback giver
+                                        feedback_giver = db.get_user_by_id(fb.get('feedback_by'))
+                                        if feedback_giver:
+                                            notify_feedback_reply(fb, user, feedback_giver)
+                                        
+                                        st.success("✅ Reply added!")
+                                        del st.session_state[f"replying_to_{fb.get('feedback_id')}_{level}"]
+                                        st.rerun()
+                                else:
+                                    st.error("❌ Please enter a reply")
+                        
+                        with col_reply2:
+                            if st.form_submit_button("❌ Cancel", use_container_width=True):
+                                del st.session_state[f"replying_to_{fb.get('feedback_id')}_{level}"]
+                                st.rerun()
+                
+                st.markdown("---")
     else:
-        st.info("No feedback yet")
+        st.info("💡 No feedback yet for this goal")
+
     # ──────────────────────────────────────────────
     # 3. Add new feedback form (only if allowed)
     # ──────────────────────────────────────────────
     if feedback_label:   # ← this means the logged-in user IS allowed
         st.markdown("---")
-        with st.expander("Add Feedback", expanded=False):
+        with st.expander("➕ Add New Feedback", expanded=False):
             with st.form(key=f"fb_form_{selected_goal['goal_id']}_{level}"):
-                rating = st.slider("Rating", 1, 5, 3)
-                comment = st.text_area("Comment *", height=120)
+                rating = st.slider("Rating", 1, 5, 3, key=f"rating_{selected_goal['goal_id']}_{level}")
+                comment = st.text_area("Comment *", height=120, key=f"comment_{selected_goal['goal_id']}_{level}")
 
-                if st.form_submit_button("Submit Feedback", use_container_width=True):
+                if st.form_submit_button("📤 Submit Feedback", use_container_width=True):
                     if not comment.strip():
-                        st.error("Comment is required")
+                        st.error("❌ Comment is required")
                     else:
                         feedback_data = {
                             'goal_id': selected_goal['goal_id'],
@@ -7618,18 +11353,18 @@ def display_feedback_section(goals, level):
                             'level': level
                         }
                         if db.create_feedback(feedback_data):
-                            # ✅ ADD THIS: Create notification for feedback received
+                            # Notify goal owner
                             goal_owner = db.get_user_by_id(target_user_id)
                             if goal_owner:
                                 notify_feedback_given(selected_goal, user, goal_owner)
                             
-                            st.success("Feedback saved successfully!")
+                            st.success("✅ Feedback submitted successfully!")
                             st.rerun()
                         else:
-                            st.error("Failed to save feedback")
+                            st.error("❌ Failed to save feedback")
     else:
         if user['id'] != target_user_id:
-            st.info("You do not have permission to give feedback to this user.")
+            st.caption("ℹ️ You do not have permission to give feedback to this user.")
 
 def display_profile():
     """Display and edit user profile"""
@@ -7924,7 +11659,7 @@ def display_employee_management():
         st.warning("⚠️ You don't have permission to access this page")
         return
     
-    st.title("⚙️ Employee Management")
+    st.title(" Employee Management")
     
     tab1, tab2, tab3, tab4 = st.tabs(["👤 Create Employee", "👥 All Employees", "👥 Manage Teams", "📋 View All Teams"])
     
@@ -7986,11 +11721,13 @@ def display_employee_management():
         # Search and filter
         col_search1, col_search2, col_search3 = st.columns(3)
         with col_search1:
-            search_emp = st.text_input(" Search by name or email", key="all_emp_search")
+            search_emp = st.text_input("🔍 Search by name or email", key="all_emp_search")
         with col_search2:
             filter_role = st.selectbox("Filter by Role", ["All"] + ["CMD", "VP", "HR", "Manager", "Employee"], key="all_emp_role")
         with col_search3:
-            filter_dept = st.selectbox("Filter by Department", ["All"] + list(set([u.get('department', 'N/A') for u in db.get_all_users()])), key="all_emp_dept")
+            all_depts = list(set([normalize_department(u.get('department')) for u in db.get_all_users()]))
+            filter_dept = st.selectbox("Filter by Department", 
+                ["All"] + sorted([d for d in all_depts if d != 'UNASSIGNED']))
         
         all_users_list = db.get_all_users()
         
@@ -8001,7 +11738,7 @@ def display_employee_management():
         if filter_role != "All":
             filtered_users = [u for u in filtered_users if u['role'] == filter_role]
         if filter_dept != "All":
-            filtered_users = [u for u in filtered_users if u.get('department', 'N/A') == filter_dept]
+            filtered_users = [u for u in filtered_users if normalize_department(u.get('department')) == filter_dept]
         
         st.markdown(f"**Showing {len(filtered_users)} of {len(all_users_list)} employees**")
         st.markdown("---")
@@ -8257,325 +11994,7 @@ def display_employee_management():
                 else:
                     st.info("No team members yet")
 
-    st.markdown("---")
-    st.subheader("🧪 Email Testing")
-
-# Create tabs for different email tests
-    test_tab1, test_tab2, test_tab3 = st.tabs([
-        "📧 Old Email Tests", 
-        "📊 Goal Sheet Reminders",
-        "✉️ Custom Test"
-    ])
     
-    # ===== TAB 1: OLD EMAIL TESTS =====
-    with test_tab1:
-        st.markdown("**Legacy Email Tests**")
-        
-        col1, col2 = st.columns(2)
-
-        with col1:
-            if st.button("📧 Test Manager Reminder (All)", use_container_width=True, key="test_old_reminder"):
-                with st.spinner("Sending test emails..."):
-                    test_send_reminder(db)
-                st.success("✅ Test emails sent to all managers!")
-
-        with col2:
-            if st.button("📧 Test Goal Completion", use_container_width=True, key="test_old_completion"):
-                from monthly_reminder import send_goal_completion_email
-                managers = [u for u in db.get_all_users() if u['role'] == 'Manager']
-                if managers and managers[0].get('email'):
-                    send_goal_completion_email(
-                        managers[0]['email'],
-                        "Test Employee",
-                        "Test Goal - Achievement Unlocked",
-                        completed=True
-                    )
-                    st.success(f"✅ Test completion email sent to {managers[0]['email']}!")
-                else:
-                    st.warning("No manager with email found")
-    
-    # ===== TAB 2: GOAL SHEET REMINDER TESTS =====
-    with test_tab2:
-        st.markdown("**Test New Goal Sheet Completion Reminders**")
-        st.info("💡 These are the new reminders that will be sent daily from 26th-31st of each month")
-        
-        # Get all HR emails for display
-        all_users = db.get_all_users()
-        hr_users = [u for u in all_users if u['role'] == 'HR' and u.get('email')]
-        hr_emails = [hr['email'] for hr in hr_users]
-        
-        if hr_emails:
-            st.success(f"📋 HR emails that will be CC'd: {', '.join(hr_emails)}")
-        else:
-            st.warning("⚠️ No HR users with email found - no CC will be added")
-        
-        st.markdown("---")
-        
-        # Test 1: Employee Reminder
-        st.markdown("#### 1️⃣ Test Employee Goal Sheet Reminder")
-        st.caption("This email goes to employees who haven't completed their goal sheet")
-        
-        col_emp1, col_emp2 = st.columns([2, 1])
-        
-        with col_emp1:
-            # Select employee to test
-            employees = [u for u in all_users if u.get('email')]
-            if employees:
-                selected_emp = st.selectbox(
-                    "Select Employee for Test",
-                    [f"{e['name']} ({e['email']})" for e in employees],
-                    key="test_emp_reminder_select"
-                )
-                
-                emp_email = selected_emp.split('(')[1].strip(')')
-                emp_obj = next(e for e in employees if e['email'] == emp_email)
-        
-        with col_emp2:
-            if st.button("📧 Send Test", use_container_width=True, key="send_test_emp_reminder"):
-                if employees:
-                    from monthly_reminder import send_goal_sheet_reminder_email
-                    
-                    # Create sample incomplete goals
-                    test_incomplete_goals = [
-                        {
-                            'goal_title': 'Sample Goal 1 - Q4 Sales Target',
-                            'goal_id': 'test_goal_1',
-                            'department': 'Sales',
-                            'kpi': 'Revenue Growth',
-                            'monthly_target': 100000,
-                            'missing_items': [
-                                'Week 1 achievement',
-                                'Week 2 rating',
-                                'Week 3 achievement',
-                                'Week 4 rating'
-                            ]
-                        },
-                        {
-                            'goal_title': 'Sample Goal 2 - Customer Acquisition',
-                            'goal_id': 'test_goal_2',
-                            'department': 'Marketing',
-                            'kpi': 'New Customers',
-                            'monthly_target': 50,
-                            'missing_items': [
-                                'Week 3 achievement',
-                                'Week 4 achievement',
-                                'Monthly achievement'
-                            ]
-                        }
-                    ]
-                    
-                    today = datetime.now(IST)
-                    
-                    with st.spinner("Sending employee reminder..."):
-                        success = send_goal_sheet_reminder_email(
-                            emp_obj['email'],
-                            emp_obj['name'],
-                            test_incomplete_goals,
-                            today.month,
-                            today.year,
-                            hr_emails
-                        )
-                    
-                    if success:
-                        st.success(f"✅ Employee reminder sent to {emp_obj['email']}")
-                        if hr_emails:
-                            st.info(f"📋 CC sent to HR: {', '.join(hr_emails)}")
-                    else:
-                        st.error("❌ Failed to send email")
-        
-        st.markdown("---")
-        
-        # Test 2: Manager Alert
-        st.markdown("#### 2️⃣ Test Manager Team Alert")
-        st.caption("This email goes to managers about their team members' incomplete goal sheets")
-        
-        col_mgr1, col_mgr2 = st.columns([2, 1])
-        
-        with col_mgr1:
-            # Select manager to test
-            managers = [u for u in all_users if u['role'] == 'Manager' and u.get('email')]
-            if managers:
-                selected_mgr = st.selectbox(
-                    "Select Manager for Test",
-                    [f"{m['name']} ({m['email']})" for m in managers],
-                    key="test_mgr_alert_select"
-                )
-                
-                mgr_email = selected_mgr.split('(')[1].strip(')')
-                mgr_obj = next(m for m in managers if m['email'] == mgr_email)
-                
-                # Select an employee from their team (or use test name)
-                team_members = db.get_team_members(mgr_obj['id'])
-                if team_members:
-                    test_emp_name = st.selectbox(
-                        "Select Team Member (for demo)",
-                        [tm['name'] for tm in team_members],
-                        key="test_team_member_select"
-                    )
-                else:
-                    test_emp_name = st.text_input(
-                        "Employee Name (no team members found - enter test name)",
-                        value="John Doe",
-                        key="test_emp_name_input"
-                    )
-        
-        with col_mgr2:
-            if st.button("📧 Send Test", use_container_width=True, key="send_test_mgr_alert"):
-                if managers:
-                    from monthly_reminder import send_manager_team_reminder_email
-                    
-                    # Create sample incomplete goals
-                    test_incomplete_goals = [
-                        {
-                            'goal_title': 'Q4 Revenue Target',
-                            'goal_id': 'test_goal_1',
-                            'department': 'Sales',
-                            'kpi': 'Monthly Revenue',
-                            'monthly_target': 150000,
-                            'missing_items': [
-                                'Week 2 achievement',
-                                'Week 3 rating',
-                                'Week 4 achievement'
-                            ]
-                        },
-                        {
-                            'goal_title': 'Client Retention Goal',
-                            'goal_id': 'test_goal_2',
-                            'department': 'Customer Success',
-                            'kpi': 'Retention Rate',
-                            'monthly_target': 95,
-                            'missing_items': [
-                                'Week 1 rating',
-                                'Week 4 achievement',
-                                'Monthly achievement'
-                            ]
-                        }
-                    ]
-                    
-                    today = datetime.now(IST)
-                    
-                    with st.spinner("Sending manager alert..."):
-                        success = send_manager_team_reminder_email(
-                            mgr_obj['email'],
-                            mgr_obj['name'],
-                            test_emp_name,
-                            test_incomplete_goals,
-                            today.month,
-                            today.year,
-                            hr_emails
-                        )
-                    
-                    if success:
-                        st.success(f"✅ Manager alert sent to {mgr_obj['email']}")
-                        st.info(f"👤 About employee: {test_emp_name}")
-                        if hr_emails:
-                            st.info(f"📋 CC sent to HR: {', '.join(hr_emails)}")
-                    else:
-                        st.error("❌ Failed to send email")
-        
-        st.markdown("---")
-        
-        # Test 3: Run Full Check
-        st.markdown("#### 3️⃣ Test Full System Check")
-        st.caption("⚠️ This will check ALL users and send actual reminders for incomplete goal sheets")
-        st.warning("**Warning:** This will send real emails to all employees and managers with incomplete goal sheets!")
-        
-        col_full1, col_full2 = st.columns([3, 1])
-        
-        with col_full1:
-            confirm_full_test = st.checkbox(
-                "I understand this will send real emails to users",
-                key="confirm_full_test"
-            )
-        
-        with col_full2:
-            if st.button(
-                "🚀 Run Check",
-                disabled=not confirm_full_test,
-                use_container_width=True,
-                key="run_full_check"
-            ):
-                with st.spinner("Running full goal sheet completion check..."):
-                    from monthly_reminder import check_and_send_reminders
-                    check_and_send_reminders(db)
-                st.success("✅ Full check completed! Check console/logs for details.")
-    
-    # ===== TAB 3: CUSTOM EMAIL TEST =====
-    with test_tab3:
-        st.markdown("**Send Test Email to Custom Address**")
-        st.info("💡 Send any of the reminder emails to a custom email address for testing")
-        
-        custom_email = st.text_input(
-            "📧 Enter Test Email Address",
-            placeholder="test@example.com",
-            key="custom_test_email"
-        )
-        
-        test_type = st.radio(
-            "Select Email Type to Test",
-            [
-                "Employee Goal Sheet Reminder",
-                "Manager Team Alert"
-            ],
-            key="custom_test_type"
-        )
-        
-        if st.button("📤 Send Custom Test", use_container_width=True, key="send_custom_test"):
-            if custom_email and '@' in custom_email:
-                today = datetime.now(IST)
-                
-                # Create sample data
-                test_incomplete_goals = [
-                    {
-                        'goal_title': 'Test Goal - Monthly Sales Target',
-                        'goal_id': 'test_1',
-                        'department': 'Sales Department',
-                        'kpi': 'Revenue Achievement',
-                        'monthly_target': 100000,
-                        'missing_items': [
-                            'Week 1 achievement',
-                            'Week 2 rating',
-                            'Week 3 achievement',
-                            'Week 4 rating'
-                        ]
-                    }
-                ]
-                
-                with st.spinner(f"Sending {test_type} to {custom_email}..."):
-                    if test_type == "Employee Goal Sheet Reminder":
-                        from monthly_reminder import send_goal_sheet_reminder_email
-                        success = send_goal_sheet_reminder_email(
-                            custom_email,
-                            "Test Employee",
-                            test_incomplete_goals,
-                            today.month,
-                            today.year,
-                            hr_emails
-                        )
-                    else:  # Manager Team Alert
-                        from monthly_reminder import send_manager_team_reminder_email
-                        success = send_manager_team_reminder_email(
-                            custom_email,
-                            "Test Manager",
-                            "Test Employee Name",
-                            test_incomplete_goals,
-                            today.month,
-                            today.year,
-                            hr_emails
-                        )
-                
-                if success:
-                    st.success(f"✅ Test email sent to {custom_email}")
-                    if hr_emails:
-                        st.info(f"📋 CC sent to HR: {', '.join(hr_emails)}")
-                else:
-                    st.error("❌ Failed to send email")
-            else:
-                st.error("❌ Please enter a valid email address")
-        
-        st.markdown("---")
-        st.caption("💡 **Tip:** Use your personal email to see how the emails look before sending to real users")
-
 
 def display_approval_page():
     """Display pending goal and achievement approvals for managers"""
@@ -8704,7 +12123,7 @@ def display_approval_page():
             for goal in pending_achievements:
                 employee = goal['employee']
                 
-                with st.expander(f"📊 {goal['goal_title']} - {employee['name']}"):
+                with st.expander(f" {goal['goal_title']} - {employee['name']}"):
                     col1, col2 = st.columns([2, 1])
                     
                     with col1:
@@ -8820,16 +12239,16 @@ def display_approval_page():
                                         st.rerun()
                     
                     st.markdown("---")
-# =========================================
 # ============================================
 # SIDEBAR
 # ============================================
+
 import base64
 
 def img_to_base64(path):
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode()
-
+    
 
 def render_sidebar():
     """Render sidebar with navigation"""
@@ -8838,7 +12257,7 @@ def render_sidebar():
     
     with st.sidebar:
         # User profile with role indicator
-
+        
         logo = img_to_base64("infopaceee.jpg")
 
         st.markdown(
@@ -8865,7 +12284,6 @@ def render_sidebar():
         """,
         unsafe_allow_html=True
     )
-        
         render_user_avatar(user)
 
         st.markdown("---")
@@ -8888,14 +12306,25 @@ def render_sidebar():
         
         
         # Role-specific navigation
-        
-        if role in ['CMD', 'VP','HR', 'Manager']:
-            if st.button("Employees", use_container_width=True, key="nav_employees"):
+        # Role-specific navigation - UPDATED LABELS
+        if role in ['CMD', 'VP', 'HR', 'Manager']:
+            # Determine label based on role
+            if role == 'CMD':
+                team_label = "Organization Overview"
+            elif role == 'VP':
+                team_label = "HR & Managers"
+            elif role == 'HR':
+                team_label = "Managers"
+            else:  # Manager
+                team_label = "My Team"
+            
+            if st.button(team_label, use_container_width=True, key="nav_employees"):
                 st.session_state.page = 'employees'
                 st.session_state.pop('viewing_employee', None)
                 st.session_state.pop('viewing_employee_year', None)
                 save_session_to_storage()
                 st.rerun()
+        
         
         if role in ['Manager']:
             # Get pending count
@@ -8934,7 +12363,8 @@ def render_sidebar():
             st.session_state.pop('viewing_employee_year', None)
             save_session_to_storage()
             st.rerun()
-            
+        
+        
         # Settings
         st.markdown("---")
         st.markdown("""
@@ -8945,7 +12375,11 @@ def render_sidebar():
             st.session_state.page = 'profile'
             save_session_to_storage()
             st.rerun()
+        # Settings
+
         
+
+
         # Logout
         st.markdown("---")
         if st.button("Logout", use_container_width=True):
@@ -8999,7 +12433,165 @@ def main():
         # Clear query params
         st.query_params.clear()
         return
-   
+    
+    def test_notifications():
+    
+        st.title("🧪 Notification Testing Dashboard")
+        
+        user = st.session_state.user
+        if not user:
+            st.warning("Please login first")
+            return
+        
+        st.markdown(f"**Testing notifications for:** {user['name']} ({user['role']})")
+
+        with st.expander("📋 Notification Routing Rules", expanded=False):
+            st.markdown("""
+            **Based on your role, notifications will be sent to:**
+            
+            - **If you are Employee:**
+            - Goal created → Manager + HR
+            - Weekly achievement → Manager + HR
+            - Goal completed → Manager + HR
+            
+            - **If you are Manager:**
+            - Goal created → VP
+            - Weekly achievement → VP
+            - Goal completed → VP
+            
+            - **If you are HR:**
+            - Goal created → VP
+            - Weekly achievement → VP
+            - Goal completed → VP
+            
+            - **If you are VP:**
+            - Goal created → CMD
+            - Weekly achievement → CMD
+            - Goal completed → CMD
+            """)
+        
+        st.markdown("---")
+        
+        
+        # Test 1: Goal Created
+        st.subheader("1️⃣ Test Goal Creation Notification")
+        if st.button("Create Test Goal Notification"):
+            test_goal = {
+                'goal_title': 'Test Goal - Notification Check',
+                'user_id': user['id']
+            }
+            notify_goal_created(test_goal, user)
+            st.success("✅ Goal creation notification sent!")
+            st.info("Check Dashboard to see notification")
+        
+        st.markdown("---")
+    
+        # Test 2: Goal Approved
+        st.subheader("2️⃣ Test Goal Approval Notification")
+        if st.button("Create Test Approval Notification"):
+            test_goal = {
+                'goal_title': 'Test Goal - Approved',
+                'goal_id': 'test_123'
+            }
+            test_employee = user
+            notify_goal_approved(test_goal, user, test_employee)
+            st.success("✅ Goal approval notification sent!")
+        
+        st.markdown("---")
+        
+        # Test 3: Weekly Achievement Updated
+        st.subheader("3️⃣ Test Weekly Achievement Notification")
+        if st.button("Create Test Weekly Update Notification"):
+            test_goal = {
+                'goal_title': 'Test Goal - Weekly Update',
+                'user_id': user['id']
+            }
+            # ✅ Test as if HR is updating (should notify VP)
+            notify_weekly_achievement_updated(test_goal, user, 1)
+            st.success("✅ Weekly achievement notification sent!")
+            st.info(f"Notification should go to: {'VP' if user['role'] == 'HR' else 'HR/Manager'}")
+
+        st.markdown("---")
+
+        # Test 4: Goal Completed
+        st.subheader("4️⃣ Test Goal Completion Notification")
+        if st.button("Create Test Completion Notification"):
+            test_goal = {
+                'goal_title': 'Test Goal - Completed',
+                'user_id': user['id']
+            }
+            # ✅ Test as if HR is completing (should notify VP)
+            notify_goal_completed(test_goal, user)
+            st.success("✅ Goal completion notification sent!")
+            st.info(f"Notification should go to: {'VP' if user['role'] == 'HR' else 'HR/Manager'}")
+        st.markdown("---")
+
+        # Test 5: Goal Not Completed
+        st.subheader("5️⃣ Test Goal Deadline Missed Notification")
+        if st.button("Create Test Deadline Missed Notification"):
+            test_goal = {
+                'goal_title': 'Test Goal - Deadline Missed',
+                'user_id': user['id']
+            }
+            notify_goal_not_completed(test_goal, user)
+            st.success("✅ Goal deadline missed notification sent!")
+        
+        st.markdown("---")
+        
+        # Test 6: Feedback Given
+        st.subheader("6️⃣ Test Feedback Notification")
+        if st.button("Create Test Feedback Notification"):
+            test_goal = {
+                'goal_title': 'Test Goal - Feedback',
+                'user_id': user['id']
+            }
+            notify_feedback_given(test_goal, user, user)
+            st.success("✅ Feedback notification sent!")
+        
+        st.markdown("---")
+        
+        # Test 7: Goal Due Soon
+        st.subheader("7️⃣ Test Goal Due Soon Notification")
+        if st.button("Create Test Due Soon Notification"):
+            test_goal = {
+                'goal_title': 'Test Goal - Due Soon',
+                'user_id': user['id']
+            }
+            notify_goal_due_soon(test_goal, user, 3)
+            st.success("✅ Goal due soon notification sent!")
+        
+        st.markdown("---")
+        
+        # View all notifications
+        st.subheader("📋 Your Recent Notifications")
+        notifications = get_user_notifications(user['id'], limit=20)
+        
+        if notifications:
+            for notif in notifications:
+                status = "✅ Read" if notif.get('is_read') else "🔴 Unread"
+                st.markdown(f"""
+                **{status}** | **{notif.get('action_type')}**  
+                {notif.get('details')}  
+                *{notif.get('created_at', 'Unknown time')}*
+                """)
+                st.markdown("---")
+        else:
+            st.info("No notifications found")
+        
+        # Clear test notifications
+        st.markdown("---")
+        if st.button("🗑️ Clear All Test Notifications", type="primary"):
+            try:
+                # Delete notifications containing "Test Goal"
+                result = supabase.table('notifications').delete().eq(
+                    'user_id', user['id']
+                ).like('details', '%Test Goal%').execute()
+                st.success("✅ Test notifications cleared!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error clearing notifications: {str(e)}")
+        
+
     if not st.session_state.user:
         login_page()
         return
@@ -9084,6 +12676,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+ 
 
 if __name__ == "__main__":
     main()
