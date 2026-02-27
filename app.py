@@ -3529,135 +3529,41 @@ def display_dashboard():
             col_cmd1, col_cmd2, col_cmd3, col_cmd4, col_cmd5 = st.columns(5)
             
             with col_cmd1:
-                st.markdown(
-                    f"""
-                    <div style="
-                        background:#FFFFFF;
-                        width:100%;
-                        height:160px;
-                        padding:20px;
-                        border-radius:10px;
-                        text-align:center;
-                        display:flex;
-                        flex-direction:column;
-                        justify-content:center;
-                        box-shadow:
-                            0 2px 4px rgba(0,0,0,0.08),
-                            0 0 18px rgba(118,75,162,0.23);
-                    ">
-                        <div style="font-size:36px; margin-bottom:10px;"></div>
-
-                        <div style="font-size:32px; font-weight:700; color:#764BA2; margin-bottom:6px;">
-                            {len(vp_team)}
-                        </div>
-
-                        <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#764BA2;
-                            padding:4px 10px; border-radius:6px; display:inline-block;">
-                            VPs
-                        </div>
+                st.markdown(f"""
+                    <div style="background:#FFFFFF;width:100%;height:160px;padding:20px;border-radius:10px;text-align:center;display:flex;flex-direction:column;justify-content:center;box-shadow:0 2px 4px rgba(0,0,0,0.08),0 0 18px rgba(118,75,162,0.23);">
+                        <div style="font-size:36px;margin-bottom:10px;"></div>
+                        <div style="font-size:32px;font-weight:700;color:#764BA2;margin-bottom:6px;">{len(vp_team)}</div>
+                        <div style="font-size:13px;font-weight:700;text-transform:uppercase;color:#764BA2;padding:4px 10px;border-radius:6px;display:inline-block;">VPs</div>
                     </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
+                """, unsafe_allow_html=True)
             
             with col_cmd2:
-                st.markdown(
-                    f"""
-                    <div style="
-                        background:#FFFFFF;
-                        width:100%;
-                        height:160px;
-                        padding:20px;
-                        border-radius:10px;
-                        text-align:center;
-                        display:flex;
-                        flex-direction:column;
-                        justify-content:center;
-                        box-shadow:
-                            0 2px 4px rgba(0,0,0,0.08),
-                            0 0 18px rgba(56,249,215,0.23);
-                    ">
-                        <div style="font-size:36px; margin-bottom:10px;"></div>
-
-                        <div style="font-size:32px; font-weight:700; color:#38F9D7; margin-bottom:6px;">
-                            {vp_team_total_goals}
-                        </div>
-
-                        <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#38F9D7;
-                            padding:4px 10px; border-radius:6px; display:inline-block;">
-                            VP Goals
-                        </div>
+                st.markdown(f"""
+                    <div style="background:#FFFFFF;width:100%;height:160px;padding:20px;border-radius:10px;text-align:center;display:flex;flex-direction:column;justify-content:center;box-shadow:0 2px 4px rgba(0,0,0,0.08),0 0 18px rgba(56,249,215,0.23);">
+                        <div style="font-size:36px;margin-bottom:10px;"></div>
+                        <div style="font-size:32px;font-weight:700;color:#38F9D7;margin-bottom:6px;">{vp_team_total_goals}</div>
+                        <div style="font-size:13px;font-weight:700;text-transform:uppercase;color:#38F9D7;padding:4px 10px;border-radius:6px;display:inline-block;">VP Goals</div>
                     </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
+                """, unsafe_allow_html=True)
             
             with col_cmd3:
-                st.markdown(
-                    f"""
-                    <div style="
-                        background:#FFFFFF;
-                        width:100%;
-                        height:160px;
-                        padding:20px;
-                        border-radius:10px;
-                        text-align:center;
-                        display:flex;
-                        flex-direction:column;
-                        justify-content:center;
-                        box-shadow:
-                            0 2px 4px rgba(0,0,0,0.08),
-                            0 0 18px rgba(245,87,108,0.23);
-                    ">
-                        <div style="font-size:36px; margin-bottom:10px;"></div>
-
-                        <div style="font-size:32px; font-weight:700; color:#F5576C; margin-bottom:6px;">
-                            {vp_team_completed_goals}
-                        </div>
-
-                        <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#F5576C;
-                            padding:4px 10px; border-radius:6px; display:inline-block;">
-                            Completed
-                        </div>
+                st.markdown(f"""
+                    <div style="background:#FFFFFF;width:100%;height:160px;padding:20px;border-radius:10px;text-align:center;display:flex;flex-direction:column;justify-content:center;box-shadow:0 2px 4px rgba(0,0,0,0.08),0 0 18px rgba(245,87,108,0.23);">
+                        <div style="font-size:36px;margin-bottom:10px;"></div>
+                        <div style="font-size:32px;font-weight:700;color:#F5576C;margin-bottom:6px;">{vp_team_completed_goals}</div>
+                        <div style="font-size:13px;font-weight:700;text-transform:uppercase;color:#F5576C;padding:4px 10px;border-radius:6px;display:inline-block;">Completed</div>
                     </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+                """, unsafe_allow_html=True)
 
             
             with col_cmd4:
-                st.markdown(
-                    f"""
-                    <div style="
-                        background:#FFFFFF;
-                        width:100%;
-                        height:160px;
-                        padding:20px;
-                        border-radius:10px;
-                        text-align:center;
-                        display:flex;
-                        flex-direction:column;
-                        justify-content:center;
-                        box-shadow:
-                            0 2px 4px rgba(0,0,0,0.08),
-                            0 0 18px rgba(245,158,11,0.23);
-                    ">
-                        <div style="font-size:36px; margin-bottom:10px;"></div>
-
-                        <div style="font-size:32px; font-weight:700; color:#F59E0B; margin-bottom:6px;">
-                            {vp_team_avg_progress:.1f}%
-                        </div>
-
-                        <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:#F59E0B;
-                            padding:4px 10px; border-radius:6px; display:inline-block;">
-                            Avg Progress
-                        </div>
+                st.markdown(f"""
+                    <div style="background:#FFFFFF;width:100%;height:160px;padding:20px;border-radius:10px;text-align:center;display:flex;flex-direction:column;justify-content:center;box-shadow:0 2px 4px rgba(0,0,0,0.08),0 0 18px rgba(245,158,11,0.23);">
+                        <div style="font-size:36px;margin-bottom:10px;"></div>
+                        <div style="font-size:32px;font-weight:700;color:#F59E0B;margin-bottom:6px;">{vp_team_avg_progress:.1f}%</div>
+                        <div style="font-size:13px;font-weight:700;text-transform:uppercase;color:#F59E0B;padding:4px 10px;border-radius:6px;display:inline-block;">Avg Progress</div>
                     </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+                """, unsafe_allow_html=True)
 
                         
             with col_cmd5:
@@ -3666,36 +3572,14 @@ def display_dashboard():
                 glow = "rgba(239,68,68,0.23)" if vp_team_overdue_goals > 0 else "rgba(16,185,129,0.23)"
                 icon = "" if vp_team_overdue_goals > 0 else ""
 
-                st.markdown(
-                    f"""
-                    <div style="
-                        background:#FFFFFF;
-                        width:100%;
-                        height:160px;
-                        padding:20px;
-                        border-radius:10px;
-                        text-align:center;
-                        display:flex;
-                        flex-direction:column;
-                        justify-content:center;
-                        box-shadow:
-                            0 2px 4px rgba(0,0,0,0.08),
-                            0 0 18px {glow};
-                    ">
-                        <div style="font-size:36px; margin-bottom:10px;">{icon}</div>
-
-                        <div style="font-size:32px; font-weight:700; color:{overdue_color}; margin-bottom:6px;">
-                            {vp_team_overdue_goals}
-                        </div>
-
-                        <div style="font-size:13px; font-weight:700; text-transform:uppercase; color:{overdue_color};
-                            background:{label_bg}; padding:4px 10px; border-radius:6px; display:inline-block;">
-                            Overdue
-                        </div>
+                st.markdown(f"""
+                    <div style="background:#FFFFFF;width:100%;height:160px;padding:20px;border-radius:10px;text-align:center;display:flex;flex-direction:column;justify-content:center;box-shadow:0 2px 4px rgba(0,0,0,0.08),0 0 18px {glow};">
+                        <div style="font-size:36px;margin-bottom:10px;">{icon}</div>
+                        <div style="font-size:32px;font-weight:700;color:{overdue_color};margin-bottom:6px;">{vp_team_overdue_goals}</div>
+                        <div style="font-size:13px;font-weight:700;text-transform:uppercase;color:{overdue_color};background:{label_bg};padding:4px 10px;border-radius:6px;display:inline-block;">Overdue</div>
                     </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+                """, unsafe_allow_html=True)
+
 
             st.markdown("---")
             # CMD Team details modal
