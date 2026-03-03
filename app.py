@@ -950,16 +950,21 @@ def mark_notification_read(notification_id):
 
 def can_modify_user(current_user_role, target_user_role):
     """Check if current user can modify target user based on hierarchy"""
+    if current_user_role == 'HR':
+        return True  # HR can delete anyone including CMD and other HR
+    
+    # Others follow strict hierarchy
     hierarchy = get_role_hierarchy()
     current_level = hierarchy.get(current_user_role, 0)
     target_level = hierarchy.get(target_user_role, 0)
-    
-    # Can only modify users at lower hierarchy levels
     return current_level > target_level
 
 
 def get_modifiable_roles(user_role):
     """Get list of roles that a user can modify"""
+    if user_role == 'HR':
+        return ['CMD', 'VP', 'HR', 'Manager', 'Employee']
+    
     hierarchy = get_role_hierarchy()
     user_level = hierarchy.get(user_role, 0)
     
@@ -4096,11 +4101,11 @@ def display_dashboard():
             all_users = db.get_all_users()
             hr_team = [u for u in all_users if u['role'] == 'HR' and u['id'] != user['id']]
             
-            # ✅ NEW: Add employees with department='HR'
-            hr_dept_employees = [u for u in all_users if u['role'] == 'Employee' and normalize_department(u.get('department')) == 'HR']
+            # ✅ NEW:# Employees directly assigned to this HR user via manager_id
+            hr_direct_reports = db.get_team_members(user['id'])
             
             # Combine for display
-            all_hr = [user] + hr_team + hr_dept_employees
+            all_hr = [user] + hr_team +  hr_direct_reports
             
             if len(all_hr) > 1:  # More than just the current user
                 # Month selector
@@ -7208,32 +7213,65 @@ def display_employees_page():
     
     # Determine what to show based on role
     if role == 'CMD':
-        # CMD sees VP, HR, and Manager cards at top level
-        employees = [u for u in all_users if u['role'] in ['VP', 'HR', 'Manager']]
         view_title = "Organization Overview"
+        employees = [u for u in all_users if u['role'] == 'VP']  # default
     elif role == 'VP':
-        # VP sees HR and Manager cards
-        employees = [u for u in all_users if u['role'] in ['HR', 'Manager']]
         view_title = "HR & Managers"
+        employees = [u for u in all_users if u['role'] == 'HR']  # default
     elif role == 'HR':
-        # HR sees only Manager cards
-        employees = [u for u in all_users if u['role'] == 'Manager' or 
-                    (u['role'] == 'Employee' and normalize_department(u.get('department')) == 'HR')]
-        view_title = "Managers & HR Team"
+        view_title = "Managers & My Team"
+        employees = [u for u in all_users if u['role'] == 'Manager']  # default
     elif role == 'Manager':
-        # Manager sees their team employees only
         employees = db.get_team_members(user['id'])
         view_title = "My Team"
     else:
         st.warning("⚠️ You don't have permission to view this page")
         return
     
+    st.title(f"👥 {view_title}")
+
+    if role == 'CMD':
+        selected_tab = st.radio(
+            "",
+            [" VPs", " HR", "Managers"],
+            horizontal=True,
+            key="cmd_team_tab"
+        )
+        if selected_tab == " VPs":
+            employees = [u for u in all_users if u['role'] == 'VP']
+        elif selected_tab == " HR":
+            employees = [u for u in all_users if u['role'] == 'HR']
+        else:
+            employees = [u for u in all_users if u['role'] == 'Manager']
+
+    elif role == 'VP':
+        selected_tab = st.radio(
+            "",
+            [" HR", " Managers"],
+            horizontal=True,
+            key="vp_team_tab"
+        )
+        if selected_tab == " HR":
+            employees = [u for u in all_users if u['role'] == 'HR']
+        else:
+            employees = [u for u in all_users if u['role'] == 'Manager']
+
+    elif role == 'HR':
+        selected_tab = st.radio(
+            "",
+            [" Managers", " My Team"],
+            horizontal=True,
+            key="hr_team_tab"
+        )
+        if selected_tab == " Managers":
+            employees = [u for u in all_users if u['role'] == 'Manager']
+        else:
+            employees = [u for u in all_users if u.get('manager_id') == user['id']]
+
     if not employees:
         st.info("No employees found")
         return
-    
-    st.title(f"👥 {view_title}")
-    
+
     # Assign Goal Section (for users who can modify)
     if role in ['CMD', 'VP', 'HR', 'Manager']:
         with st.expander("➕ Assign Goal to Employee"):
@@ -7354,11 +7392,11 @@ def display_employees_page():
                     st.rerun()
                     
                     # Get current year as default
-                    today = date.today()
-                    st.session_state.selected_year = today.year
+                    # today = date.today()
+                    # st.session_state.selected_year = today.year
                     
-                    st.session_state.page = 'employee_quarters'  # ✅ GO DIRECTLY TO QUARTERS
-                    st.rerun()
+                    # st.session_state.page = 'employee_quarters'  # ✅ GO DIRECTLY TO QUARTERS
+                    # st.rerun()
 
     
     # Edit Employee Modal - Show at top with expander
@@ -7385,10 +7423,12 @@ def display_employees_page():
                 new_designation = st.text_input("Designation", value=edit_emp.get('designation', ''))
             
             with col2:
+                all_roles = ["Employee", "Manager", "HR", "VP", "CMD"]
+                current_role_idx = all_roles.index(edit_emp['role']) if edit_emp['role'] in all_roles else 0
                 new_role = st.selectbox(
-                    "Role*", 
-                    ["Employee", "Manager", "HR"],
-                    index=["Employee", "Manager", "HR"].index(edit_emp['role'])
+                    "Role*",
+                    all_roles,
+                    index=current_role_idx
                 )
                 new_department = st.text_input("Department", value=edit_emp.get('department', ''))
                 
@@ -7514,6 +7554,10 @@ def display_vp_team_view():
     with col1:
         if st.button("← Back"):
             st.session_state.pop('viewing_vp_team', None)
+            st.session_state.pop('previous_manager', None)
+            st.session_state.pop('selected_year', None)
+            st.session_state.pop('selected_quarter', None)
+            st.session_state.pop('selected_month', None)
             st.session_state.page = 'employees'
             st.rerun()
     with col2:
@@ -7593,6 +7637,10 @@ def display_hr_team_view():
     with col1:
         if st.button("← Back"):
             st.session_state.pop('viewing_hr_team', None)
+            st.session_state.pop('previous_manager', None)
+            st.session_state.pop('selected_year', None)
+            st.session_state.pop('selected_quarter', None)
+            st.session_state.pop('selected_month', None)
             st.session_state.page = 'employees'
             st.rerun()
     with col2:
@@ -7663,6 +7711,10 @@ def display_manager_team_view():
     with col1:
         if st.button("← Back"):
             st.session_state.pop('viewing_manager_team', None)
+            st.session_state.pop('previous_manager', None)
+            st.session_state.pop('selected_year', None)
+            st.session_state.pop('selected_quarter', None)
+            st.session_state.pop('selected_month', None)
             st.session_state.page = 'employees'
             st.rerun()
     with col2:
@@ -7792,14 +7844,10 @@ def display_quick_assign_goal_form(user, employees):
         # ========== ADD THIS ENTIRE SECTION ==========
         st.markdown("**Weekly Ratings (Optional)**")
         col_r1, col_r2, col_r3, col_r4 = st.columns(4)
-        with col_r1:
-            w1_rating = st.selectbox("Week 1 Rating", [0, 1, 2, 3, 4], key="quick_w1_rating")
-        with col_r2:
-            w2_rating = st.selectbox("Week 2 Rating", [0, 1, 2, 3, 4], key="quick_w2_rating")
-        with col_r3:
-            w3_rating = st.selectbox("Week 3 Rating", [0, 1, 2, 3, 4], key="quick_w3_rating")
-        with col_r4:
-            w4_rating = st.selectbox("Week 4 Rating", [0, 1, 2, 3, 4], key="quick_w4_rating")
+        w1_rating = st.selectbox("Week 1 Rating", [0, 1, 2, 3, 4], key="qassign_w1_rating")
+        w2_rating = st.selectbox("Week 2 Rating", [0, 1, 2, 3, 4], key="qassign_w2_rating")
+        w3_rating = st.selectbox("Week 3 Rating", [0, 1, 2, 3, 4], key="qassign_w3_rating")
+        w4_rating = st.selectbox("Week 4 Rating", [0, 1, 2, 3, 4], key="qassign_w4_rating")
         # ========== END OF ADDED SECTION ==========
         if st.form_submit_button("✅ Assign Goal", use_container_width=True):
             if department and title and kpi:
@@ -10016,210 +10064,209 @@ def display_monthly_view(user, year, quarter, month, is_read_only=False):
                             st.error("❌ Failed to save achievements")
         # ===== EDIT GOAL TAB =====
         if not is_read_only and action_tab2:
-            if action_tab2:
-                with action_tab2:
-                    st.subheader("Edit Goal Details")
+            with action_tab2:
+                st.subheader("Edit Goal Details")
                     
-                    edit_goal_title = st.selectbox(
-                        "Select Goal to Edit", 
-                        [g['goal_title'] for g in goals],
-                        key="edit_goal_select"
-                    )
-                    edit_goal = next(g for g in goals if g['goal_title'] == edit_goal_title)
+                edit_goal_title = st.selectbox(
+                    "Select Goal to Edit", 
+                    [g['goal_title'] for g in goals],
+                    key="edit_goal_select"
+                )
+                edit_goal = next(g for g in goals if g['goal_title'] == edit_goal_title)
                     
-                    with st.form("edit_goal_form"):
-                        st.markdown("**Basic Information**")
-                        col1, col2 = st.columns(2)
+                with st.form("edit_goal_form"):
+                    st.markdown("**Basic Information**")
+                    col1, col2 = st.columns(2)
                         
-                        with col1:
-                            new_department = st.text_input("Department*", value=edit_goal.get('department', ''))
-                            new_title = st.text_input("Goal Title*", value=edit_goal['goal_title'])
-                            new_kpi = st.text_input("KPI*", value=edit_goal.get('kpi', ''))
+                    with col1:
+                        new_department = st.text_input("Department*", value=edit_goal.get('department', ''))
+                        new_title = st.text_input("Goal Title*", value=edit_goal['goal_title'])
+                        new_kpi = st.text_input("KPI*", value=edit_goal.get('kpi', ''))
                         
-                        with col2:
-                            from datetime import datetime as dt
-                            start_date_str = edit_goal.get('start_date', str(date.today()))
-                            end_date_str = edit_goal.get('end_date', str(date.today()))
+                    with col2:
+                        from datetime import datetime as dt
+                        start_date_str = edit_goal.get('start_date', str(date.today()))
+                        end_date_str = edit_goal.get('end_date', str(date.today()))
                             
-                            if isinstance(start_date_str, str):
-                                start_date_val = dt.strptime(start_date_str, '%Y-%m-%d').date()
-                            else:
-                                start_date_val = start_date_str
+                        if isinstance(start_date_str, str):
+                            start_date_val = dt.strptime(start_date_str, '%Y-%m-%d').date()
+                        else:
+                            start_date_val = start_date_str
                             
-                            if isinstance(end_date_str, str):
-                                end_date_val = dt.strptime(end_date_str, '%Y-%m-%d').date()
-                            else:
-                                end_date_val = end_date_str
+                        if isinstance(end_date_str, str):
+                            end_date_val = dt.strptime(end_date_str, '%Y-%m-%d').date()
+                        else:
+                            end_date_val = end_date_str
                             
-                            new_start_date = st.date_input("Start Date", value=start_date_val)
-                            new_end_date = st.date_input("End Date", value=end_date_val)
-                            new_status = st.selectbox(
-                                "Status", 
-                                ['Active', 'Completed', 'On Hold', 'Cancelled'],
-                                index=['Active', 'Completed', 'On Hold', 'Cancelled'].index(edit_goal.get('status', 'Active'))
-                            )
+                        new_start_date = st.date_input("Start Date", value=start_date_val)
+                        new_end_date = st.date_input("End Date", value=end_date_val)
+                        new_status = st.selectbox(
+                            "Status", 
+                            ['Active', 'Completed', 'On Hold', 'Cancelled'],
+                            index=['Active', 'Completed', 'On Hold', 'Cancelled'].index(edit_goal.get('status', 'Active'))
+                        )
                         
-                        new_description = st.text_area("Description", value=edit_goal.get('goal_description', ''))
+                    new_description = st.text_area("Description", value=edit_goal.get('goal_description', ''))
                         
-                        st.markdown("**Targets**")
-                        col3, col4 = st.columns(2)
+                    st.markdown("**Targets**")
+                    col3, col4 = st.columns(2)
                         
-                        with col3:
-                            new_monthly_target = st.number_input(
-                                "Monthly Target*", 
-                                min_value=0.0, 
-                                value=float(edit_goal.get('monthly_target', 0))
-                            )
+                    with col3:
+                        new_monthly_target = st.number_input(
+                            "Monthly Target*", 
+                            min_value=0.0, 
+                            value=float(edit_goal.get('monthly_target', 0))
+                        )
                         
-                        st.markdown("**Weekly Targets**")
-                        col5, col6, col7, col8 = st.columns(4)
+                    st.markdown("**Weekly Targets**")
+                    col5, col6, col7, col8 = st.columns(4)
                         
-                        with col5:
-                            new_w1_target = st.number_input(
-                                "Week 1 Target", 
-                                min_value=0.0, 
-                                value=float(edit_goal.get('week1_target', 0)),
-                                key="edit_w1_target"
-                            )
-                        with col6:
-                            new_w2_target = st.number_input(
-                                "Week 2 Target", 
-                                min_value=0.0, 
-                                value=float(edit_goal.get('week2_target', 0)),
-                                key="edit_w2_target"
-                            )
-                        with col7:
-                            new_w3_target = st.number_input(
-                                "Week 3 Target", 
-                                min_value=0.0, 
-                                value=float(edit_goal.get('week3_target', 0)),
-                                key="edit_w3_target"
-                            )
-                        with col8:
-                            new_w4_target = st.number_input(
-                                "Week 4 Target", 
-                                min_value=0.0, 
-                                value=float(edit_goal.get('week4_target', 0)),
-                                key="edit_w4_target"
-                            )
+                    with col5:
+                        new_w1_target = st.number_input(
+                            "Week 1 Target", 
+                            min_value=0.0, 
+                            value=float(edit_goal.get('week1_target', 0)),
+                            key="edit_w1_target"
+                        )
+                    with col6:
+                        new_w2_target = st.number_input(
+                            "Week 2 Target", 
+                            min_value=0.0, 
+                            value=float(edit_goal.get('week2_target', 0)),
+                            key="edit_w2_target"
+                        )
+                    with col7:
+                        new_w3_target = st.number_input(
+                            "Week 3 Target", 
+                            min_value=0.0, 
+                            value=float(edit_goal.get('week3_target', 0)),
+                            key="edit_w3_target"
+                        )
+                    with col8:
+                        new_w4_target = st.number_input(
+                            "Week 4 Target", 
+                            min_value=0.0, 
+                            value=float(edit_goal.get('week4_target', 0)),
+                            key="edit_w4_target"
+                        )
                         
-                        st.markdown("**Weekly Remarks**")
-                        col_r5, col_r6, col_r7, col_r8 = st.columns(4)
+                    st.markdown("**Weekly Remarks**")
+                    col_r5, col_r6, col_r7, col_r8 = st.columns(4)
 
-                        with col_r5:
-                            new_w1_remarks = st.text_area(
-                                "Week 1 Remarks",
-                                value=edit_goal.get('week1_remarks', ''),
-                                key="edit_w1_remarks",
-                                height=80
-                            )
-                        with col_r6:
-                            new_w2_remarks = st.text_area(
-                                "Week 2 Remarks",
-                                value=edit_goal.get('week2_remarks', ''),
-                                key="edit_w2_remarks",
-                                height=80
-                            )
-                        with col_r7:
-                            new_w3_remarks = st.text_area(
-                                "Week 3 Remarks",
-                                value=edit_goal.get('week3_remarks', ''),
-                                key="edit_w3_remarks",
-                                height=80
-                            )
-                        with col_r8:
-                            new_w4_remarks = st.text_area(
-                                "Week 4 Remarks",
-                                value=edit_goal.get('week4_remarks', ''),
-                                key="edit_w4_remarks",
-                                height=80
-                            )
+                    with col_r5:
+                        new_w1_remarks = st.text_area(
+                            "Week 1 Remarks",
+                            value=edit_goal.get('week1_remarks', ''),
+                            key="edit_w1_remarks",
+                            height=80
+                        )
+                    with col_r6:
+                        new_w2_remarks = st.text_area(
+                            "Week 2 Remarks",
+                            value=edit_goal.get('week2_remarks', ''),
+                            key="edit_w2_remarks",
+                            height=80
+                        )
+                    with col_r7:
+                        new_w3_remarks = st.text_area(
+                            "Week 3 Remarks",
+                            value=edit_goal.get('week3_remarks', ''),
+                            key="edit_w3_remarks",
+                            height=80
+                        )
+                    with col_r8:
+                        new_w4_remarks = st.text_area(
+                            "Week 4 Remarks",
+                            value=edit_goal.get('week4_remarks', ''),
+                            key="edit_w4_remarks",
+                            height=80
+                        )
                         
-                        submitted = st.form_submit_button("💾 Save Changes", use_container_width=True)
+                    submitted = st.form_submit_button("💾 Save Changes", use_container_width=True)
                         
-                        if submitted:
-                            if new_department and new_title and new_kpi:
-                                updates = {
-                                    'department': new_department,
-                                    'goal_title': new_title,
-                                    'goal_description': new_description,
-                                    'kpi': new_kpi,
-                                    'monthly_target': new_monthly_target,
-                                    'week1_target': new_w1_target,
-                                    'week2_target': new_w2_target,
-                                    'week3_target': new_w3_target,
-                                    'week4_target': new_w4_target,
-                                    'week1_remarks': new_w1_remarks,
-                                    'week2_remarks': new_w2_remarks,
-                                    'week3_remarks': new_w3_remarks,
-                                    'week4_remarks': new_w4_remarks,
-                                    'start_date': str(new_start_date),
-                                    'end_date': str(new_end_date),
-                                    'status': new_status
-                                }
+                    if submitted:
+                        if new_department and new_title and new_kpi:
+                            updates = {
+                                'department': new_department,
+                                'goal_title': new_title,
+                                'goal_description': new_description,
+                                'kpi': new_kpi,
+                                'monthly_target': new_monthly_target,
+                                'week1_target': new_w1_target,
+                                'week2_target': new_w2_target,
+                                'week3_target': new_w3_target,
+                                'week4_target': new_w4_target,
+                                'week1_remarks': new_w1_remarks,
+                                'week2_remarks': new_w2_remarks,
+                                'week3_remarks': new_w3_remarks,
+                                'week4_remarks': new_w4_remarks,
+                                'start_date': str(new_start_date),
+                                'end_date': str(new_end_date),
+                                'status': new_status
+                            }
                                 
-                                if db.update_goal(edit_goal['goal_id'], updates):
-                                    st.success("✅ Goal updated successfully!")
-                                    goal_owner = db.get_user_by_id(edit_goal['user_id'])
-                                    if goal_owner:
-                                        notify_goal_edited(edit_goal, user, goal_owner)
-                                    st.rerun()
-                                else:
-                                    st.error("❌ Failed to update goal")
+                            if db.update_goal(edit_goal['goal_id'], updates):
+                                st.success("✅ Goal updated successfully!")
+                                goal_owner = db.get_user_by_id(edit_goal['user_id'])
+                                if goal_owner:
+                                    notify_goal_edited(edit_goal, user, goal_owner)
+                                st.rerun()
                             else:
-                                st.error("❌ Please fill all required fields (Department, Title, KPI)")
+                                st.error("❌ Failed to update goal")
+                        else:
+                            st.error("❌ Please fill all required fields (Department, Title, KPI)")
+                   
         
         # ===== DELETE GOAL TAB =====
         if not is_read_only and action_tab3:
-            if action_tab3:
-                with action_tab3:
-                    st.subheader("⚠️ Delete Goal")
-                    st.warning("**Warning:** Deleting a goal will also delete all associated feedback. This action cannot be undone!")
+            with action_tab3:
+                st.subheader("⚠️ Delete Goal")
+                st.warning("**Warning:** Deleting a goal will also delete all associated feedback. This action cannot be undone!")
                     
-                    delete_goal_title = st.selectbox(
-                        "Select Goal to Delete", 
-                        [g['goal_title'] for g in goals],
-                        key="delete_goal_select"
-                    )
-                    delete_goal = next(g for g in goals if g['goal_title'] == delete_goal_title)
+                delete_goal_title = st.selectbox(
+                    "Select Goal to Delete", 
+                    [g['goal_title'] for g in goals],
+                    key="delete_goal_select"
+                )
+                delete_goal = next(g for g in goals if g['goal_title'] == delete_goal_title)
                     
-                    st.markdown("**Goal Details:**")
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.info(f"**Vertical:** {delete_goal.get('vertical', 'N/A')}")
-                    with col2:
-                        st.info(f"**KPI:** {delete_goal.get('kpi', 'N/A')}")
-                    with col3:
-                        st.info(f"**Target:** {delete_goal.get('monthly_target', 0)}")
+                st.markdown("**Goal Details:**")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.info(f"**Vertical:** {delete_goal.get('vertical', 'N/A')}")
+                with col2:
+                    st.info(f"**KPI:** {delete_goal.get('kpi', 'N/A')}")
+                with col3:
+                    st.info(f"**Target:** {delete_goal.get('monthly_target', 0)}")
                     
-                    st.markdown(f"**Description:** {delete_goal.get('goal_description', 'No description')}")
+                st.markdown(f"**Description:** {delete_goal.get('goal_description', 'No description')}")
                     
-                    st.markdown("---")
-                    confirm_delete = st.checkbox("I understand this action cannot be undone", key="confirm_delete")
+                st.markdown("---")
+                confirm_delete = st.checkbox("I understand this action cannot be undone", key="confirm_delete")
                     
-                    col_del1, col_del2, col_del3 = st.columns([1, 1, 1])
+                col_del1, col_del2, col_del3 = st.columns([1, 1, 1])
                     
-                    with col_del2:
-                        if st.button(
-                            "🗑️ Delete Goal", 
-                            disabled=not confirm_delete,
-                            use_container_width=True,
-                            type="primary"
-                        ):
-                            if db.delete_goal(delete_goal['goal_id']):
-                                st.success("✅ Goal deleted successfully!")
-                                goal_owner = db.get_user_by_id(delete_goal['user_id'])
-                                if goal_owner:
-                                    notify_goal_deleted(delete_goal, user, goal_owner)
-                                st.rerun()
-                            else:
-                                st.error("❌ Failed to delete goal")
+                with col_del2:
+                    if st.button(
+                        "🗑️ Delete Goal", 
+                        disabled=not confirm_delete,
+                        use_container_width=True,
+                        type="primary"
+                    ):
+                        if db.delete_goal(delete_goal['goal_id']):
+                            st.success("✅ Goal deleted successfully!")
+                            goal_owner = db.get_user_by_id(delete_goal['user_id'])
+                            if goal_owner:
+                                notify_goal_deleted(delete_goal, user, goal_owner)
+                            st.rerun()
+                        else:
+                            st.error("❌ Failed to delete goal")
         
             
                         # Add new goal (only for own goals)
-                    if not st.session_state.get('viewing_employee_year')and not goals:
-                        st.markdown("---")
-                        display_add_goal_form(user, year, quarter, month)
+                if not st.session_state.get('viewing_employee_year')and not goals:
+                    st.markdown("---")
+                    display_add_goal_form(user, year, quarter, month)
         
         # Feedback section
     if goals:
@@ -10290,14 +10337,10 @@ def display_assign_goal_form_monthly(user, year, quarter, month):
         # ========== ADD THIS ENTIRE SECTION ==========
         st.markdown("**Weekly Ratings (Optional)**")
         col_r1, col_r2, col_r3, col_r4 = st.columns(4)
-        with col_r1:
-            w1_rating = st.selectbox("Week 1 Rating", [0, 1, 2, 3, 4], key="quick_w1_rating")
-        with col_r2:
-            w2_rating = st.selectbox("Week 2 Rating", [0, 1, 2, 3, 4], key="quick_w2_rating")
-        with col_r3:
-            w3_rating = st.selectbox("Week 3 Rating", [0, 1, 2, 3, 4], key="quick_w3_rating")
-        with col_r4:
-            w4_rating = st.selectbox("Week 4 Rating", [0, 1, 2, 3, 4], key="quick_w4_rating")
+        w1_rating = st.selectbox("Week 1 Rating", [0, 1, 2, 3, 4], key="massign_w1_rating")
+        w2_rating = st.selectbox("Week 2 Rating", [0, 1, 2, 3, 4], key="massign_w2_rating")
+        w3_rating = st.selectbox("Week 3 Rating", [0, 1, 2, 3, 4], key="massign_w3_rating")
+        w4_rating = st.selectbox("Week 4 Rating", [0, 1, 2, 3, 4], key="massign_w4_rating")
         # ========== END OF ADDED SECTION ==========
 
         if st.form_submit_button("✅ Assign Goal", use_container_width=True):
@@ -10875,16 +10918,14 @@ def display_add_goal_form(user, year, quarter, month):
                 w4_t = st.number_input("Week 4 Target", min_value=0.0, value=weekly_target)
 
             # ADD THIS NEW SECTION
+            # ADD THIS NEW SECTION
             st.markdown("**Weekly Ratings (Optional)**")
             col_r1, col_r2, col_r3, col_r4 = st.columns(4)
-            with col_r1:
-                w1_rating = st.selectbox("Week 1 Rating", [0, 1, 2, 3, 4], key="quick_w1_rating")
-            with col_r2:
-                w2_rating = st.selectbox("Week 2 Rating", [0, 1, 2, 3, 4], key="quick_w2_rating")
-            with col_r3:
-                w3_rating = st.selectbox("Week 3 Rating", [0, 1, 2, 3, 4], key="quick_w3_rating")
-            with col_r4:
-                w4_rating = st.selectbox("Week 4 Rating", [0, 1, 2, 3, 4], key="quick_w4_rating")
+            w1_rating = st.selectbox("Week 1 Rating", [0, 1, 2, 3, 4], key="addgoal_w1_rating")
+            w2_rating = st.selectbox("Week 2 Rating", [0, 1, 2, 3, 4], key="addgoal_w2_rating")
+            w3_rating = st.selectbox("Week 3 Rating", [0, 1, 2, 3, 4], key="addgoal_w3_rating")
+            w4_rating = st.selectbox("Week 4 Rating", [0, 1, 2, 3, 4], key="addgoal_w4_rating")
+                        
                         
             if st.form_submit_button("Create Goal", use_container_width=True):
                 if department and title and kpi:
@@ -10958,15 +10999,11 @@ def display_add_goal_form_inline(user, year, quarter, month):
         
         st.markdown("**Weekly Ratings (Optional)**")
         col_r1, col_r2, col_r3, col_r4 = st.columns(4)
-        with col_r1:
-            w1_rating = st.selectbox("Week 1 Rating", [0, 1, 2, 3, 4], key="quick_w1_rating")
-        with col_r2:
-            w2_rating = st.selectbox("Week 2 Rating", [0, 1, 2, 3, 4], key="quick_w2_rating")
-        with col_r3:
-            w3_rating = st.selectbox("Week 3 Rating", [0, 1, 2, 3, 4], key="quick_w3_rating")
-        with col_r4:
-            w4_rating = st.selectbox("Week 4 Rating", [0, 1, 2, 3, 4], key="quick_w4_rating")
-        
+        w1_rating = st.selectbox("Week 1 Rating", [0, 1, 2, 3, 4], key="inline_w1_rating")
+        w2_rating = st.selectbox("Week 2 Rating", [0, 1, 2, 3, 4], key="inline_w2_rating")
+        w3_rating = st.selectbox("Week 3 Rating", [0, 1, 2, 3, 4], key="inline_w3_rating")
+        w4_rating = st.selectbox("Week 4 Rating", [0, 1, 2, 3, 4], key="inline_w4_rating")
+
         col_submit, col_cancel = st.columns(2)
         
         with col_submit:
@@ -10996,18 +11033,34 @@ def display_add_goal_form_inline(user, year, quarter, month):
                     }
                     
                     if db.create_goal(goal_data):
-                        if user['role'] == 'Employee' and user.get('manager_id'):
-                            manager = db.get_user_by_id(user['manager_id'])
-                            if manager and manager.get('email'):
-                                send_goal_approval_email(
-                                    manager['email'],
-                                    user['name'],
-                                    goal_data,
-                                    goal_data.get('goal_id')  # You'll need to get this from create_goal return
-                                )
-                                st.success(f"✅ Goal created! Approval request sent to your manager.")
+                        if user['role'] == 'Employee':
+                            if user.get('manager_id'):
+                                manager = db.get_user_by_id(user['manager_id'])
+                                if manager and manager.get('email'):
+                                    send_goal_approval_email(
+                                        manager['email'],
+                                        user['name'],
+                                        goal_data,
+                                        goal_data.get('goal_id')
+                                    )
+                                    st.success(f"✅ Goal created! Approval request sent to your manager.")
+                                else:
+                                    st.warning(f"✅ Goal created! But manager email not found.")
                             else:
-                                st.warning(f"✅ Goal created! But manager email not found.")
+                                # No manager assigned — send approval request to all HR users
+                                all_users = db.get_all_users()
+                                hr_users = [u for u in all_users if u['role'] == 'HR']
+                                if hr_users:
+                                    for hr in hr_users:
+                                        send_goal_approval_email(
+                                            hr['email'],
+                                            user['name'],
+                                            goal_data,
+                                            goal_data.get('goal_id')
+                                        )
+                                    st.success(f"✅ Goal created! Approval request sent to HR (no manager assigned).")
+                                else:
+                                    st.warning(f"✅ Goal created! But no HR or manager found to send approval.")
                         else:
                             st.success(f"✅ Goal created successfully!")
                         
@@ -11831,13 +11884,20 @@ def display_employee_management():
                 )
                 
                 if st.button("Assign to Team", use_container_width=True):
+                    success_count = 0
                     for emp_str in selected_employees:
                         emp_email = emp_str.split('(')[1].strip(')')
                         emp_id = next(e['id'] for e in unassigned_employees if e['email'] == emp_email)
-                        db.update_user(emp_id, {'manager_id': selected_manager['id']})
+                        result = db.update_user(emp_id, {'manager_id': selected_manager['id']})
+                        if result:
+                            success_count += 1
                     
-                    st.success(f"✅ Assigned {len(selected_employees)} employees to {selected_manager['name']}")
-                    st.rerun()
+                    if success_count > 0:
+                        st.success(f"✅ Assigned {success_count} employees to {selected_manager['name']}")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("❌ Assignment failed. Check database connection.")
             else:
                 st.info("No unassigned employees available")
     
@@ -11872,9 +11932,13 @@ def display_employee_management():
                     
                     if remove_member != "None" and st.button(f"Remove {remove_member}", key=f"btn_remove_{manager['id']}"):
                         member_id = next(m['id'] for m in team if m['name'] == remove_member)
-                        db.update_user(member_id, {'manager_id': None})
-                        st.success(f"✅ Removed {remove_member} from team")
-                        st.rerun()
+                        result = db.update_user(member_id, {'manager_id': None})
+                        if result:
+                            st.success(f"✅ Removed {remove_member} from team")
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"❌ Failed to remove {remove_member}. Check database connection.")
                 else:
                     st.info("No team members yet")
 
@@ -11898,7 +11962,30 @@ def display_approval_page():
         st.subheader("Pending Goal Approvals")
         
         # Get pending goal approvals
-        pending_goals = db.get_pending_approvals(user['id'])
+        if user['role'] == 'Manager':
+            pending_goals = db.get_pending_approvals(user['id'])
+        elif user['role'] == 'HR':
+            pending_goals = []
+            # Get employees directly under this HR user
+            hr_team = db.get_team_members(user['id'])
+            for u in hr_team:
+                user_goals = db.get_user_all_goals(u['id'])
+                for g in user_goals:
+                    if g.get('approval_status') == 'pending':
+                        pending_goals.append(g)
+            
+            # Also get employees with no manager assigned at all
+            all_users = db.get_all_users()
+            for u in all_users:
+                if u['role'] == 'Employee' and not u.get('manager_id'):
+                    user_goals = db.get_user_all_goals(u['id'])
+                    for g in user_goals:
+                        if g.get('approval_status') == 'pending':
+                            # Avoid duplicates
+                            if g not in pending_goals:
+                                pending_goals.append(g)
+        else:
+            pending_goals = []
         
         if not pending_goals:
             st.success("🎉 No pending goal approvals!")
@@ -11940,7 +12027,12 @@ def display_approval_page():
                         st.markdown("**Actions:**")
                         
                         if st.button("✅ Approve", key=f"approve_goal_{goal['goal_id']}", use_container_width=True):
-                            if db.update_goal_approval(goal['goal_id'], 'approved', user['id']):
+                            if db.update_goal_approval(
+                                goal['goal_id'], 
+                                'approved', 
+                                user['id'],
+                                user['name']   # 👈 ADD THIS
+                            ):
                                 st.success("✅ Goal approved!")
                                 
                                 # Notify employee and HR
@@ -11988,7 +12080,13 @@ def display_approval_page():
         st.subheader("Pending Achievement Approvals")
         
         # Get team members
-        team_members = db.get_team_members(user['id'])
+        if user['role'] == 'Manager':
+            team_members = db.get_team_members(user['id'])
+        elif user['role'] in ['HR', 'VP']:
+            all_users = db.get_all_users()
+            team_members = [u for u in all_users if u['role'] == 'Employee']
+        else:
+            team_members = []
         
         pending_achievements = []
         for member in team_members:
@@ -12058,6 +12156,7 @@ def display_approval_page():
                                 'week4_rating': goal.get('week4_rating_pending'),
                                 'achievement_approval_status': 'approved',
                                 'achievement_approved_by': user['id'],
+                                'achievement_approved_by_name': user['name'],
                                 'achievement_approved_at': datetime.now(IST).isoformat()
                             }
                             
@@ -12198,7 +12297,7 @@ def render_sidebar():
             elif role == 'VP':
                 team_label = "HR & Managers"
             elif role == 'HR':
-                team_label = "Managers"
+                team_label = "Managers & My Team"
             else:  # Manager
                 team_label = "My Team"
             
@@ -12210,7 +12309,7 @@ def render_sidebar():
                 st.rerun()
         
         
-        if role in ['Manager']:
+        if role in ['Manager', 'HR']:
             # Get pending count
             pending_count = len(db.get_pending_approvals(user['id']))
             
