@@ -21,6 +21,17 @@ IST = ZoneInfo("Asia/Kolkata")
 
 load_dotenv()
 
+def normalize_department(dept_name):
+    """Normalize department name to be case-insensitive and handle variations"""
+    if not dept_name or dept_name.strip() == '':
+        return 'Unassigned'
+    # Convert to uppercase and strip whitespace
+    normalized = dept_name.strip().upper()
+    # Handle common variations
+    if normalized in ['N/A', 'NA', 'NONE']:
+        return 'Unassigned'
+    return normalized
+
 # Initialize once globally
 @st.cache_resource
 def get_supabase_client() -> Client:
@@ -127,16 +138,15 @@ class Database:
         except:
             return []
     
-    def get_team_members(self, manager_id: str) -> List[Dict]:
-        """Get team members reporting to a manager"""
-        try:
-            response = self.supabase.table('users')\
-                .select('*')\
-                .eq('manager_id', manager_id)\
-                .execute()
-            return response.data or []
-        except:
+    # In database.py, modify get_team_members():
+    def get_team_members(self, user_id):
+        user = self.get_user_by_id(user_id)
+        if not user:
             return []
+        
+        # Same logic for everyone - fetch users where manager_id matches
+        result = self.supabase.table('users').select('*').eq('manager_id', user_id).execute()
+        return result.data if result.data else []
     
     def create_user(self, user_data: Dict[str, Any]) -> bool:
         """Create a new user"""
@@ -932,12 +942,13 @@ class Database:
         except Exception as e:
             print(f"Error getting user: {str(e)}")
             return None    
-    def update_goal_approval(self, goal_id, status, approved_by_id, rejection_reason=None):
+    def update_goal_approval(self, goal_id, status, approved_by_id, approved_by_name, rejection_reason=None):
         """Update goal approval status"""
         try:
             updates = {
                 'approval_status': status,
                 'approved_by': approved_by_id,
+                'approved_by_name': approved_by_name,
                 'approved_at': datetime.now(IST).isoformat() if status == 'approved' else None
             }
             
@@ -1012,4 +1023,70 @@ class Database:
             return True
         except Exception as e:
             print(f"Error marking token used: {str(e)}")
+            return False
+        
+    def normalize_goal_departments(self):
+    
+        try:
+            # Get all goals
+            result = self.supabase.table('goals').select('*').execute()  # Use self.supabase
+            goals = result.data if result.data else []
+            
+            for goal in goals:
+                old_dept = goal.get('department')
+                if old_dept:
+                    new_dept = normalize_department(old_dept)
+                    if old_dept != new_dept:
+                        # Update the goal
+                        self.supabase.table('goals').update({
+                            'department': new_dept
+                        }).eq('goal_id', goal['goal_id']).execute()
+            
+            # Also normalize user departments
+            result = self.supabase.table('users').select('*').execute()
+            users = result.data if result.data else []
+            
+            for user in users:
+                old_dept = user.get('department')
+                if old_dept:
+                    new_dept = normalize_department(old_dept)
+                    if old_dept != new_dept:
+                        # Update the user
+                        self.supabase.table('users').update({
+                            'department': new_dept
+                        }).eq('id', user['id']).execute()
+            
+            return True
+        except Exception as e:
+            print(f"Error normalizing departments: {str(e)}")
+            return False
+        
+    # In database.py, add this method to Database class
+
+    def add_access_level_column(self):
+        """Add access_level column to users table if not exists"""
+        try:
+            # Check if column exists
+            result = self.supabase.table('users').select('access_level').limit(1).execute()
+            print("✓ access_level column already exists")
+            return True
+        except Exception as e:
+            print(f"Note: {str(e)}")
+            # Column doesn't exist, you'll need to add it via Supabase SQL editor
+            print("""
+            Please run this SQL in Supabase SQL Editor:
+            
+            ALTER TABLE users 
+            ADD COLUMN IF NOT EXISTS access_level VARCHAR(50) DEFAULT 'full';
+            
+            -- Set employee-level HR
+            UPDATE users 
+            SET access_level = 'employee' 
+            WHERE role = 'HR' AND manager_id IS NOT NULL;
+            
+            -- Set full access for others
+            UPDATE users 
+            SET access_level = 'full' 
+            WHERE access_level IS NULL;
+            """)
             return False
