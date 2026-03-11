@@ -1,4 +1,8 @@
-
+.env
+venv/
+__pycache__/
+*.pyc
+*.pem
 
 #Ignore vscode AI rules
 .github\instructions\codacy.instructions.md
