@@ -1,11 +1,14 @@
-"""
-Performance Management System - Main Application
-A comprehensive PMS built with Streamlit and Supabase
-"""
 import sys
 sys.setrecursionlimit(3000)
 
 import streamlit as st
+
+st.set_page_config(
+    page_title="Performance Management System", 
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)   
 import pandas as pd
 from datetime import datetime, date, timedelta
 import pytz
@@ -24,10 +27,17 @@ from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak, Image
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from dotenv import load_dotenv
 from dateutil.relativedelta import relativedelta
 from database import get_supabase_client
+from helper import (
+    apply_theme, init_session_state, get_quarter_months, get_month_name,
+    get_quarter_name, calculate_progress, format_goal_table_data,
+    render_user_avatar, render_card, render_metric_card, render_progress_bar,
+    render_feedback_card, validate_goal_data
+)
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -101,6 +111,97 @@ def metric_card(
 
     st.markdown(html, unsafe_allow_html=True)
 
+load_dotenv()
+
+supabase = get_supabase_client()
+
+@st.cache_data(ttl=60)
+def load_all_data():
+    return {
+        'users': supabase.table('users').select('*').execute().data or [],
+        'goals': supabase.table('goals').select('*').execute().data or [],
+        'feedback': supabase.table('feedback').select('*').execute().data or []
+    }
+
+def cached_get_all_users():
+    return load_all_data()['users']
+
+def cached_get_user_by_id(user_id):
+    return next((u for u in load_all_data()['users'] if u['id'] == user_id), None)
+
+def cached_get_user_all_goals(user_id):
+    return [g for g in load_all_data()['goals'] if g['user_id'] == user_id]
+
+def cached_get_all_goals_bulk():
+    return load_all_data()['goals']
+
+def cached_get_team_members(manager_id):
+    return [u for u in load_all_data()['users'] if u.get('manager_id') == manager_id]
+
+def cached_get_month_goals(user_id, year, quarter, month):
+    return [
+        g for g in load_all_data()['goals']
+        if g['user_id'] == user_id
+        and g['year'] == year
+        and g.get('quarter') == quarter
+        and g.get('month') == month
+        and g.get('week') is None
+    ]
+
+def cached_get_all_feedback():
+    all_goals = load_all_data()['goals']
+    all_users = load_all_data()['users']
+    goal_map = {g['goal_id']: g for g in all_goals}
+    user_map = {u['id']: u for u in all_users}
+    feedbacks = []
+    for fb in load_all_data()['feedback']:
+        goal = goal_map.get(fb['goal_id'], {})
+        user = user_map.get(fb.get('feedback_by'), {})
+        feedbacks.append({
+            **fb,
+            'goal_title': goal.get('goal_title', 'N/A'),
+            'feedback_by_name': user.get('name', 'Unknown')
+        })
+    return feedbacks
+
+def cached_get_user_goal_stats(user_id):
+    user = cached_get_user_by_id(user_id)
+    if not user:
+        return {'total_goals': 0, 'completed_goals': 0, 'active_goals': 0, 'avg_progress': 0}
+    
+    goals = cached_get_user_all_goals(user_id)
+    if user['role'] == 'Employee':
+        goals = [g for g in goals if g.get('approval_status') == 'approved']
+    
+    if not goals:
+        return {'total_goals': 0, 'completed_goals': 0, 'active_goals': 0, 'avg_progress': 0}
+    
+    total_progress = 0
+    count = 0
+    for g in goals:
+        ach = g.get('monthly_achievement')
+        tgt = g.get('monthly_target', 1)
+        if ach is not None and tgt > 0:
+            total_progress += (ach / tgt * 100)
+            count += 1
+    
+    return {
+        'total_goals': len(goals),
+        'completed_goals': len([g for g in goals if g.get('status') == 'Completed']),
+        'active_goals': len([g for g in goals if g.get('status') == 'Active']),
+        'avg_progress': round(total_progress / count, 2) if count > 0 else 0
+    }
+
+def cached_get_pending_approvals(manager_id):
+    team_ids = {m['id'] for m in cached_get_team_members(manager_id)}
+    return [
+        g for g in load_all_data()['goals']
+        if g.get('approval_status') == 'pending'
+        and g['user_id'] in team_ids
+    ]
+
+def clear_all_cache():
+    load_all_data.clear()
 
 def get_fiscal_quarter(month):
     """
@@ -187,7 +288,7 @@ def notify_goal_created(goal_data, creator_user):
     # Employee creates goal -> Notify Manager (pending approval)
     if creator_role == 'Employee':
         if creator_user.get('manager_id'):
-            manager = db.get_user_by_id(creator_user['manager_id'])
+            manager = cached_get_user_by_id(creator_user['manager_id'])
             if manager:
                 create_notification({
                     'user_id': manager['id'],
@@ -201,7 +302,7 @@ def notify_goal_created(goal_data, creator_user):
     
     # Manager creates goal -> Notify VP
     elif creator_role == 'Manager':
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         vp_users = [u for u in all_users if u['role'] == 'VP']
         for vp in vp_users:
             create_notification({
@@ -216,7 +317,7 @@ def notify_goal_created(goal_data, creator_user):
     
     # HR creates goal -> Notify VP
     elif creator_role == 'HR':
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         vp_users = [u for u in all_users if u['role'] == 'VP']
         for vp in vp_users:
             create_notification({
@@ -231,7 +332,7 @@ def notify_goal_created(goal_data, creator_user):
     
     # VP creates goal -> Notify CMD
     elif creator_role == 'VP':
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         cmd_users = [u for u in all_users if u['role'] == 'CMD']
         for cmd in cmd_users:
             create_notification({
@@ -257,7 +358,7 @@ def notify_goal_approved(goal, approver_user, employee_user):
     })
     
     # Also notify HR that an approved goal exists
-    all_users = db.get_all_users()
+    all_users = cached_get_all_users()
     hr_users = [u for u in all_users if u['role'] == 'HR']
     for hr in hr_users:
         create_notification({
@@ -273,13 +374,13 @@ def notify_goal_approved(goal, approver_user, employee_user):
 def notify_weekly_achievement_updated(goal, updater_user, week_num):
     """Notify relevant users when weekly achievement is updated"""
     updater_role = updater_user['role']
-    goal_owner = db.get_user_by_id(goal['user_id'])
+    goal_owner = cached_get_all_users(goal['user_id'])
     
     # Employee updates -> Notify Manager AND HR
     if updater_role == 'Employee':
         # Notify Manager
         if goal_owner.get('manager_id'):
-            manager = db.get_user_by_id(goal_owner['manager_id'])
+            manager = cached_get_all_users(goal_owner['manager_id'])
             if manager:
                 create_notification({
                     'user_id': manager['id'],
@@ -292,7 +393,7 @@ def notify_weekly_achievement_updated(goal, updater_user, week_num):
                 })
         
         # ✅ ALWAYS notify HR
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         hr_users = [u for u in all_users if u['role'] == 'HR']
         for hr in hr_users:
             create_notification({
@@ -307,7 +408,7 @@ def notify_weekly_achievement_updated(goal, updater_user, week_num):
     
     # Manager/HR updates -> Notify VP
     elif updater_role in ['Manager', 'HR']:
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         vp_users = [u for u in all_users if u['role'] == 'VP']
         for vp in vp_users:
             create_notification({
@@ -322,7 +423,7 @@ def notify_weekly_achievement_updated(goal, updater_user, week_num):
     
     # VP updates -> Notify CMD
     elif updater_role == 'VP':
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         cmd_users = [u for u in all_users if u['role'] == 'CMD']
         for cmd in cmd_users:
             create_notification({
@@ -349,13 +450,13 @@ def render_clickable_metric_card(label, value, color, icon, key, detail_type):
 def notify_goal_completed(goal, completer_user):
     """Notify relevant users when a goal is completed"""
     completer_role = completer_user['role']
-    goal_owner = db.get_user_by_id(goal['user_id'])
+    goal_owner = cached_get_all_users(goal['user_id'])
     
     # Employee completes -> Notify Manager AND HR
     if completer_role == 'Employee':
         # Notify Manager
         if goal_owner.get('manager_id'):
-            manager = db.get_user_by_id(goal_owner['manager_id'])
+            manager = cached_get_all_users(goal_owner['manager_id'])
             if manager:
                 create_notification({
                     'user_id': manager['id'],
@@ -368,7 +469,7 @@ def notify_goal_completed(goal, completer_user):
                 })
         
         # ✅ ALWAYS notify HR
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         hr_users = [u for u in all_users if u['role'] == 'HR']
         for hr in hr_users:
             create_notification({
@@ -383,7 +484,7 @@ def notify_goal_completed(goal, completer_user):
     
     # Manager/HR completes -> Notify VP
     elif completer_role in ['Manager', 'HR']:
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         vp_users = [u for u in all_users if u['role'] == 'VP']
         for vp in vp_users:
             create_notification({
@@ -398,7 +499,7 @@ def notify_goal_completed(goal, completer_user):
     
     # VP completes -> Notify CMD
     elif completer_role == 'VP':
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         cmd_users = [u for u in all_users if u['role'] == 'CMD']
         for cmd in cmd_users:
             create_notification({
@@ -429,7 +530,7 @@ def notify_goal_not_completed(goal, goal_owner):
     # Employee -> Notify Manager
     if owner_role == 'Employee':
         if goal_owner.get('manager_id'):
-            manager = db.get_user_by_id(goal_owner['manager_id'])
+            manager = cached_get_all_users(goal_owner['manager_id'])
             if manager:
                 create_notification({
                     'user_id': manager['id'],
@@ -442,7 +543,7 @@ def notify_goal_not_completed(goal, goal_owner):
                 })
         
         # Notify HR
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         hr_users = [u for u in all_users if u['role'] == 'HR']
         for hr in hr_users:
             create_notification({
@@ -457,7 +558,7 @@ def notify_goal_not_completed(goal, goal_owner):
     
     # Manager/HR -> Notify VP
     elif owner_role in ['Manager', 'HR']:
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         vp_users = [u for u in all_users if u['role'] == 'VP']
         for vp in vp_users:
             create_notification({
@@ -472,7 +573,7 @@ def notify_goal_not_completed(goal, goal_owner):
     
     # VP -> Notify CMD
     elif owner_role == 'VP':
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         cmd_users = [u for u in all_users if u['role'] == 'CMD']
         for cmd in cmd_users:
             create_notification({
@@ -503,7 +604,7 @@ def notify_feedback_given(goal, feedback_giver, goal_owner):
     
     # Manager gives feedback to Employee -> Notify HR
     if giver_role == 'Manager' and owner_role == 'Employee':
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         hr_users = [u for u in all_users if u['role'] == 'HR']
         for hr in hr_users:
             create_notification({
@@ -639,7 +740,7 @@ def notify_goal_edited(goal, editor_user, goal_owner):
         
         # Notify HR when CMD/VP/Manager edits goals
         if editor_role in ['CMD', 'VP', 'Manager']:
-            all_users = db.get_all_users()
+            all_users = cached_get_all_users()
             hr_users = [u for u in all_users if u['role'] == 'HR']
             for hr in hr_users:
                 create_notification({
@@ -654,7 +755,7 @@ def notify_goal_edited(goal, editor_user, goal_owner):
     
     # If Manager edits own goal -> Notify VP
     elif editor_role == 'Manager':
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         vp_users = [u for u in all_users if u['role'] == 'VP']
         for vp in vp_users:
             create_notification({
@@ -669,7 +770,7 @@ def notify_goal_edited(goal, editor_user, goal_owner):
     
     # If VP edits own goal -> Notify CMD
     elif editor_role == 'VP':
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         cmd_users = [u for u in all_users if u['role'] == 'CMD']
         for cmd in cmd_users:
             create_notification({
@@ -702,7 +803,7 @@ def notify_goal_deleted(goal, deleter_user, goal_owner):
         
         # Notify HR when CMD/VP/Manager deletes goals
         if deleter_role in ['CMD', 'VP', 'Manager']:
-            all_users = db.get_all_users()
+            all_users = cached_get_all_users()
             hr_users = [u for u in all_users if u['role'] == 'HR']
             for hr in hr_users:
                 create_notification({
@@ -717,7 +818,7 @@ def notify_goal_deleted(goal, deleter_user, goal_owner):
     
     # If Manager deletes own goal -> Notify VP
     elif deleter_role == 'Manager':
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         vp_users = [u for u in all_users if u['role'] == 'VP']
         for vp in vp_users:
             create_notification({
@@ -732,7 +833,7 @@ def notify_goal_deleted(goal, deleter_user, goal_owner):
     
     # If VP deletes own goal -> Notify CMD
     elif deleter_role == 'VP':
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         cmd_users = [u for u in all_users if u['role'] == 'CMD']
         for cmd in cmd_users:
             create_notification({
@@ -775,7 +876,7 @@ def notify_goal_not_updated(goal, goal_owner, week_num):
     # Employee -> Notify Manager
     if owner_role == 'Employee':
         if goal_owner.get('manager_id'):
-            manager = db.get_user_by_id(goal_owner['manager_id'])
+            manager = cached_get_all_users(goal_owner['manager_id'])
             if manager:
                 create_notification({
                     'user_id': manager['id'],
@@ -790,13 +891,13 @@ def notify_goal_not_updated(goal, goal_owner, week_num):
 def check_and_notify_due_dates_and_missing_updates():
     """Daily check for goals due soon and missing weekly updates"""
     today = date.today()
-    all_users = db.get_all_users()
+    all_users = cached_get_all_users()
     
     # ✅ Track what we've already notified to prevent duplicates
     notified_goals = set()
     
     for user in all_users:
-        goals = db.get_user_all_goals(user['id'])
+        goals = cached_get_user_all_goals(user['id'])
         
         for goal in goals:
             goal_id = goal.get('goal_id')
@@ -878,7 +979,7 @@ def check_and_notify_due_dates_and_missing_updates():
                                     notified_goals.add(goal_id)
              # Check for all roles (Manager, HR, VP, CMD) about their own goals
         if user['role'] in ['Manager', 'HR', 'VP', 'CMD']:
-            goals = db.get_user_all_goals(user['id'])
+            goals = cached_get_user_all_goals(user['id'])
             
             for goal in goals:
                 if goal.get('status') == 'Active':
@@ -1409,7 +1510,7 @@ def get_trend_data(user_id, months=6):
         
         # Get goals for this month
         try:
-            goals = db.get_month_goals(user_id, year, quarter, month)
+            goals = cached_get_month_goals(user_id, year, quarter, month)
             
             if goals and len(goals) > 0:
                 metrics = calculate_performance_metrics(goals)
@@ -1664,6 +1765,295 @@ def create_heatmap_calendar(goals, year, month):
     
     return fig
 
+# ============================================
+# BULK GOAL UPLOAD PAGE
+# ============================================
+def display_bulk_upload():
+    """Bulk upload goals from Excel file"""
+    user = st.session_state.user
+    
+    if user['role'] not in ['HR', 'CMD', 'VP', 'Manager']:
+        st.warning("⚠️ You don't have permission to access this page")
+        return
+    
+    st.title("📤 Bulk Goal Upload")
+    st.info("Upload an Excel file with goals. Download the template first if you don't have one.")
+    
+    uploaded_file = st.file_uploader("Choose Excel file", type=['xlsx'])
+    
+    if uploaded_file:
+        try:
+            df = pd.read_excel(uploaded_file, header=None)
+            
+            # Row 0 = column names, Row 1 = REQUIRED/OPTIONAL, Data starts row 2
+            df.columns = df.iloc[0]
+            df = df[2:].reset_index(drop=True)
+            
+            st.success(f"✅ File loaded — {len(df)} goals found")
+            st.markdown("---")
+            
+            # Preview
+            st.subheader("📋 Preview")
+            st.dataframe(df, use_container_width=True)
+            
+            st.markdown("---")
+            
+            # Validate
+            errors = []
+            warnings = []
+            all_users = cached_get_all_users()
+            user_email_map = {u['email']: u for u in all_users}
+            
+            for idx, row in df.iterrows():
+                row_num = idx + 3  # actual Excel row number
+                email = str(row.get('employee_email', '')).strip()
+                
+                # Check email exists
+                if not email or email == 'nan':
+                    errors.append(f"Row {row_num}: employee_email is empty")
+                elif email not in user_email_map:
+                    errors.append(f"Row {row_num}: Email '{email}' not found in system")
+                
+                # Check required fields
+                for field in ['year', 'quarter', 'month', 'department', 'goal_title', 'kpi', 'monthly_target', 'start_date', 'end_date']:
+                    val = row.get(field)
+                    if val is None or str(val).strip() == '' or str(val) == 'nan':
+                        errors.append(f"Row {row_num}: '{field}' is required but empty")
+                
+                # Check quarter value
+                try:
+                    q = int(row.get('quarter', 0))
+                    if q not in [1, 2, 3, 4]:
+                        errors.append(f"Row {row_num}: quarter must be 1, 2, 3, or 4")
+                except:
+                    errors.append(f"Row {row_num}: quarter must be a number")
+                
+                # Check month value
+                try:
+                    m = int(row.get('month', 0))
+                    if m not in range(1, 13):
+                        errors.append(f"Row {row_num}: month must be 1 to 12")
+                except:
+                    errors.append(f"Row {row_num}: month must be a number")
+            
+            # Show validation results
+            if errors:
+                st.error(f"❌ {len(errors)} error(s) found — fix these before uploading:")
+                for err in errors:
+                    st.markdown(f"- {err}")
+                return
+            
+            if warnings:
+                for w in warnings:
+                    st.warning(w)
+            
+            st.success("✅ All rows validated successfully!")
+            st.markdown("---")
+            
+            # Upload button
+            col1, col2, col3 = st.columns([1, 1, 1])
+            with col2:
+                if st.button("🚀 Upload All Goals", use_container_width=True, type="primary"):
+                    success_count = 0
+                    fail_count = 0
+                    
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    for idx, row in df.iterrows():
+                        email = str(row.get('employee_email', '')).strip()
+                        emp = user_email_map.get(email)
+                        
+                        if not emp:
+                            fail_count += 1
+                            continue
+                        
+                        # Handle weekly targets - auto divide if empty
+                        monthly_target = float(row.get('monthly_target', 0) or 0)
+                        auto_week = monthly_target / 4
+                        
+                        def get_week_target(w):
+                            val = row.get(f'week{w}_target')
+                            if val is None or str(val) == 'nan':
+                                return auto_week
+                            return float(val)
+                        
+                        # Format dates
+                        def format_date(d):
+                            if d is None or str(d) == 'nan':
+                                return None
+                            return str(d)[:10]
+                        
+                        goal_data = {
+                            'user_id': emp['id'],
+                            'year': int(row.get('year')),
+                            'quarter': int(row.get('quarter')),
+                            'month': int(row.get('month')),
+                            'department': str(row.get('department', '')).strip(),
+                            'goal_title': str(row.get('goal_title', '')).strip(),
+                            'goal_description': str(row.get('goal_description', '')) if str(row.get('goal_description', '')) != 'nan' else '',
+                            'kpi': str(row.get('kpi', '')).strip(),
+                            'monthly_target': monthly_target,
+                            'week1_target': get_week_target(1),
+                            'week2_target': get_week_target(2),
+                            'week3_target': get_week_target(3),
+                            'week4_target': get_week_target(4),
+                            'start_date': format_date(row.get('start_date')),
+                            'end_date': format_date(row.get('end_date')),
+                            'status': str(row.get('status', 'Active')).strip() if str(row.get('status', '')) != 'nan' else 'Active',
+                            'approval_status': 'approved',
+                            'created_by': user['id']
+                        }
+                        
+                        status_text.text(f"Uploading: {goal_data['goal_title']} for {emp['name']}...")
+                        
+                        if db.create_goal(goal_data):
+                            load_all_data.clear()
+                            success_count += 1
+                        else:
+                            fail_count += 1
+                        
+                        progress_bar.progress((idx + 1) / len(df))
+                    
+                    progress_bar.progress(1.0)
+                    status_text.empty()
+                    
+                    st.markdown("---")
+                    if success_count > 0:
+                        st.success(f"🎉 Successfully uploaded {success_count} goals!")
+                        st.balloons()
+                    if fail_count > 0:
+                        st.error(f"❌ {fail_count} goals failed to upload")
+        
+        except Exception as e:
+            st.error(f"❌ Error reading file: {str(e)}")
+            st.info("Make sure you are using the correct template format")
+
+def export_all_goals_excel():
+    """Export all goals of all users into one Excel file"""
+    all_users = cached_get_all_users()
+    all_goals = []
+    
+    for u in all_users:
+        user_goals = cached_get_user_all_goals(u['id'])
+        for goal in user_goals:
+            goal['employee_name'] = u['name']
+            goal['employee_email'] = u['email']
+            goal['employee_role'] = u['role']
+            goal['employee_department'] = u.get('department', 'N/A')
+            all_goals.append(goal)
+    
+    if not all_goals:
+        return None
+    
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "All Goals"
+    
+    # Styles
+    header_fill = PatternFill(start_color="3B82F6", end_color="3B82F6", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    border = Border(
+        left=Side(style='thin'), right=Side(style='thin'),
+        top=Side(style='thin'), bottom=Side(style='thin')
+    )
+    
+    # Headers
+    headers = [
+        "Employee Name", "Email", "Role", "Department",
+        "Year", "Quarter", "Month", "Goal Title", "KPI",
+        "Description", "Monthly Target",
+        "Week 1 Target", "Week 2 Target", "Week 3 Target", "Week 4 Target",
+        "Week 1 Achievement", "Week 2 Achievement", "Week 3 Achievement", "Week 4 Achievement",
+        "Monthly Achievement",
+        "Week 1 Rating", "Week 2 Rating", "Week 3 Rating", "Week 4 Rating",
+        "Start Date", "End Date", "Status", "Approval Status", "Progress %"
+    ]
+    
+    for col, header in enumerate(headers, 1):
+        c = ws.cell(row=1, column=col)
+        c.value = header
+        c.fill = header_fill
+        c.font = header_font
+        c.alignment = center
+        c.border = border
+    
+    # Data rows
+    for row_idx, goal in enumerate(all_goals, 2):
+        monthly_achievement = goal.get('monthly_achievement')
+        monthly_target = goal.get('monthly_target', 0) or 0
+        
+        # Calculate progress
+        if monthly_achievement is not None and monthly_target > 0:
+            progress = round((monthly_achievement / monthly_target) * 100, 1)
+        else:
+            progress = 0
+        
+        # Progress color
+        if progress >= 100:
+            row_fill = PatternFill(start_color="DCFCE7", end_color="DCFCE7", fill_type="solid")
+        elif progress >= 60:
+            row_fill = PatternFill(start_color="FEF9C3", end_color="FEF9C3", fill_type="solid")
+        elif progress > 0:
+            row_fill = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")
+        else:
+            row_fill = None
+        
+        row_data = [
+            goal.get('employee_name', ''),
+            goal.get('employee_email', ''),
+            goal.get('employee_role', ''),
+            goal.get('employee_department', ''),
+            goal.get('year', ''),
+            goal.get('quarter', ''),
+            get_month_name(goal.get('month', 1)),
+            goal.get('goal_title', ''),
+            goal.get('kpi', ''),
+            goal.get('goal_description', ''),
+            monthly_target,
+            goal.get('week1_target', 0) or 0,
+            goal.get('week2_target', 0) or 0,
+            goal.get('week3_target', 0) or 0,
+            goal.get('week4_target', 0) or 0,
+            goal.get('week1_achievement') if goal.get('week1_achievement') is not None else '-',
+            goal.get('week2_achievement') if goal.get('week2_achievement') is not None else '-',
+            goal.get('week3_achievement') if goal.get('week3_achievement') is not None else '-',
+            goal.get('week4_achievement') if goal.get('week4_achievement') is not None else '-',
+            monthly_achievement if monthly_achievement is not None else '-',
+            goal.get('week1_rating', 0) or 0,
+            goal.get('week2_rating', 0) or 0,
+            goal.get('week3_rating', 0) or 0,
+            goal.get('week4_rating', 0) or 0,
+            str(goal.get('start_date', ''))[:10],
+            str(goal.get('end_date', ''))[:10],
+            goal.get('status', 'Active'),
+            goal.get('approval_status', 'approved'),
+            f"{progress}%"
+        ]
+        
+        for col, val in enumerate(row_data, 1):
+            c = ws.cell(row=row_idx, column=col)
+            c.value = val
+            c.border = border
+            c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+            if row_fill:
+                c.fill = row_fill
+    
+    # Column widths
+    col_widths = [20, 28, 12, 15, 8, 10, 12, 35, 20, 35, 15,
+                  12, 12, 12, 12, 15, 15, 15, 15, 18,
+                  12, 12, 12, 12, 12, 12, 12, 15, 12]
+    for i, width in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = width
+    
+    ws.row_dimensions[1].height = 30
+    ws.freeze_panes = "A2"
+    
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
 
 # ============================================
 # PDF REPORT GENERATION
@@ -1813,7 +2203,7 @@ def display_analytics_page():
     
     with col_filter1:
         if role in ['CMD', 'VP', 'HR']:
-            all_users = db.get_all_users()
+            all_users = cached_get_all_users()
             selected_user = st.selectbox(
                 "Select User",
                 ["My Analytics"] + [f"{u['name']} ({u['email']})" for u in all_users]
@@ -1824,7 +2214,7 @@ def display_analytics_page():
                 user_email = selected_user.split('(')[1].strip(')')
                 analysis_user = next(u for u in all_users if u['email'] == user_email)
         elif role == 'Manager':
-            team_members = db.get_team_members(user['id'])
+            team_members = cached_get_team_members(user['id'])
             selected_user = st.selectbox(
                 "Select Team Member",
                 ["My Analytics"] + [f"{m['name']} ({m['email']})" for m in team_members]
@@ -1850,7 +2240,7 @@ def display_analytics_page():
         )
     
     # Get goals based on period
-    all_goals = db.get_user_all_goals(analysis_user['id'])
+    all_goals = cached_get_user_all_goals(analysis_user['id'])
     today = date.today()
     
     if analysis_period == "Current Month":
@@ -2058,7 +2448,7 @@ def display_analytics_page():
             if role == 'HR':
                 # HR: Compare with same role users
                 selected_role = analysis_user['role']
-                all_users = db.get_all_users()
+                all_users = cached_get_all_users()
                 
                 if selected_role == 'Manager':
                     compare_users = [u for u in all_users if u['role'] == 'Manager']
@@ -2074,11 +2464,11 @@ def display_analytics_page():
                 # Manager compares team members only (not themselves)
                 if analysis_user['id'] == user['id']:
                     # Manager viewing their own analytics - compare with team only
-                    compare_users = db.get_team_members(user['id'])
+                    compare_users = cached_get_team_members(user['id'])
                     comparison_title = "Compare Team Members"
                 else:
                     # Manager viewing a team member - compare with other team members
-                    team_members = db.get_team_members(user['id'])
+                    team_members = cached_get_team_members(user['id'])
                     compare_users = [m for m in team_members]
                     comparison_title = "Compare with Team Members"
             
@@ -2093,7 +2483,7 @@ def display_analytics_page():
                 
                 # Add all users (including current)
                 for comp_user in compare_users:
-                    comp_goals = db.get_user_all_goals(comp_user['id'])
+                    comp_goals = cached_get_user_all_goals(comp_user['id'])
                     if comp_goals:
                         comp_metrics = calculate_performance_metrics(comp_goals)
                         is_current = (comp_user['id'] == analysis_user['id'])
@@ -2398,7 +2788,7 @@ def display_analytics_page():
                 st.warning("No data to export")
 def get_completable_goals(user_id):
     """Get all goals that can be auto-completed"""
-    all_goals = db.get_user_all_goals(user_id)
+    all_goals = cached_get_user_all_goals(user_id)
     
     completable = []
     for goal in all_goals:
@@ -2502,13 +2892,13 @@ def get_current_team_rankings(manager_id, year=None, month=None):
     if month is None:
         month = date.today().month
     
-    team_members = db.get_team_members(manager_id)
+    team_members = cached_get_team_members(manager_id)
     
     rankings = []
     for member in team_members:
         # Get goals for specific month
         quarter = ((month - 1) // 3) + 1
-        goals = db.get_month_goals(member['id'], year, quarter, month)
+        goals = cached_get_month_goals(member['id'], year, quarter, month)
         
         if goals:
             stats = calculate_performance_metrics(goals)
@@ -2710,13 +3100,6 @@ def send_password_reset_email(email, reset_token):
 
 
 # ✅ PAGE CONFIG MUST BE FIRST STREAMLIT COMMAND
-st.set_page_config(
-    page_title="Performance Management System",
-    page_icon="infopacee.jpg",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
 # Load environment variables
 load_dotenv()
 
@@ -2802,7 +3185,7 @@ def manually_check_notifications():
     # Show notification stats
     st.subheader(" Notification Statistics")
     
-    all_users = db.get_all_users()
+    all_users = cached_get_all_users()
     total_notifs = 0
     unread_notifs = 0
     
@@ -2861,7 +3244,7 @@ def restore_session_from_storage():
         user_id = st.query_params.get('user_id')
         if user_id:
             # Restore user from database
-            user = db.get_user_by_id(user_id)
+            user = cached_get_user_by_id(user_id)
             if user:
                 st.session_state.user = user
                 st.session_state.page = st.query_params.get('page', 'dashboard')
@@ -2891,7 +3274,7 @@ def restore_session_from_storage():
                 # ✅ Restore employee viewing state
                 viewing_emp_id = st.query_params.get('viewing_emp_id')
                 if viewing_emp_id:
-                    viewing_employee = db.get_user_by_id(viewing_emp_id)
+                    viewing_employee = cached_get_user_by_id(viewing_emp_id)
                     if viewing_employee:
                         st.session_state.viewing_employee = viewing_employee
                 
@@ -3227,7 +3610,7 @@ def display_dashboard():
 
         with col_filter1:
             # Team filter dropdown
-            all_users = db.get_all_users()
+            all_users = cached_get_all_users()
             departments = list(set([normalize_department(u.get('department')) for u in all_users]))
             departments = ['All Teams'] + sorted([d for d in departments if d and d != 'UNASSIGNED'])
                     
@@ -3490,7 +3873,7 @@ def display_dashboard():
             st.caption(f"**VP Team Performance: {get_month_name(cmd_team_month)} {current_year}**")
             
             # Get all VPs (CMD's team)
-            all_users = db.get_all_users()
+            all_users = cached_get_all_users()
             vp_team = [u for u in all_users if u['role'] == 'VP']
             
             # Calculate VP team metrics for selected month
@@ -3745,7 +4128,7 @@ def display_dashboard():
                 st.caption(f"**Team Performance: {get_month_name(vp_team_month)} {current_year}**")
                 
                 # Get all HR and Managers (VP's team)
-                all_users = db.get_all_users()
+                all_users = cached_get_all_users()
                 vp_team = [u for u in all_users if u['role'] in ['HR', 'Manager']]
                 
                 # Calculate team metrics for selected month
@@ -4098,11 +4481,11 @@ def display_dashboard():
             st.markdown("### 👥 HR Team Performance")
             
             # Get all HR members + employees with department='HR'
-            all_users = db.get_all_users()
+            all_users = cached_get_all_users()
             hr_team = [u for u in all_users if u['role'] == 'HR' and u['id'] != user['id']]
             
             # ✅ NEW:# Employees directly assigned to this HR user via manager_id
-            hr_direct_reports = db.get_team_members(user['id'])
+            hr_direct_reports = cached_get_team_members(user['id'])
             
             # Combine for display
             all_hr = [user] + hr_team +  hr_direct_reports
@@ -4447,7 +4830,7 @@ def display_dashboard():
                 if u['id'] != selected_user_id:
                     continue  # Skip this user if not the selected user
             
-            user_goals = db.get_user_all_goals(u['id'])
+            user_goals = cached_get_user_all_goals(u['id'])
             
             for goal in user_goals:
                 # Apply month filter
@@ -4564,7 +4947,7 @@ def display_dashboard():
         rankings = []
 
         if role == 'Manager':
-            team_members = db.get_team_members(user['id'])
+            team_members = cached_get_team_members(user['id'])
             employees_to_rank = [m for m in team_members if m['role'] == 'Employee']
             top_count = 3
             performer_scope = "Team"
@@ -4574,7 +4957,7 @@ def display_dashboard():
             performer_scope = "Organization"
 
         for emp in employees_to_rank:
-            emp_stats = db.get_user_goal_stats(emp['id'])
+            emp_stats = cached_get_user_goal_stats(emp['id'])
             if emp_stats.get('total_goals', 0) > 0:
                 rankings.append({
                     'Name': emp['name'],
@@ -4913,7 +5296,7 @@ def display_dashboard():
         st.markdown("---")
 
         # Team Overview
-        team_members = db.get_team_members(user['id'])
+        team_members = cached_get_team_members(user['id'])
         st.markdown("###  Team Overview")
 
         # Month selector for team performance
@@ -5275,7 +5658,7 @@ def display_dashboard():
         team_rankings = []
 
         for member in team_members:
-            member_stats = db.get_user_goal_stats(member['id'])
+            member_stats = cached_get_user_goal_stats(member['id'])
             if member_stats.get('total_goals', 0) > 0:
                 team_rankings.append({
                     'Name': member['name'],
@@ -5318,7 +5701,7 @@ def display_dashboard():
         st.caption(f"**Your Performance: {get_month_name(emp_selected_month)} {current_year}**")
 
         # Get all user goals
-        all_user_goals = db.get_user_all_goals(user['id'])
+        all_user_goals = cached_get_user_all_goals(user['id'])
 
         # Only approved goals count for employee metrics
         if user['role'] == 'Employee':
@@ -5956,11 +6339,11 @@ def check_and_notify_missed_deadlines():
     """Check for goals past their deadline and notify managers"""
     try:
         today = date.today()
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         
         for user in all_users:
             if user['role'] in ['Employee', 'Manager', 'HR', 'VP']:
-                goals = db.get_user_all_goals(user['id'])
+                goals = cached_get_user_all_goals(user['id'])
                 
                 for goal in goals:
                     if goal.get('status') == 'Active':
@@ -5984,7 +6367,7 @@ def check_and_notify_missed_deadlines():
                                     # If not completed (less than 100%), notify manager
                                     if progress < 100:
                                         if user.get('manager_id'):
-                                            manager = db.get_user_by_id(user['manager_id'])
+                                            manager = cached_get_user_by_id(user['manager_id'])
                                             if manager and manager.get('email'):
                                                 send_goal_completion_email(
                                                     manager['email'],
@@ -6058,7 +6441,7 @@ def display_view_all_goals():
     # Select user based on mode
     if view_mode == 'organization' and role in ['CMD', 'VP', 'HR']:
         # Organization-wide view - show all users
-        all_users = db.get_all_users()
+        all_users = cached_get_all_users()
         
         # Filter users based on role permissions
         if role == 'HR':
@@ -6075,7 +6458,7 @@ def display_view_all_goals():
             # Get all goals from all viewable users
             all_goals = []
             for u in viewable_users:
-                user_goals = db.get_user_all_goals(u['id'])
+                user_goals = cached_get_user_all_goals(u['id'])
                 for g in user_goals:
                     g['user_name'] = u['name']
                     g['user_role'] = u['role']
@@ -6086,7 +6469,7 @@ def display_view_all_goals():
             user_email = selected_user_option.split(' - ')[1]
             selected_user_obj = next(u for u in viewable_users if u['email'] == user_email)
             view_user_id = selected_user_obj['id']
-            all_goals = db.get_user_all_goals(view_user_id)
+            all_goals = cached_get_user_all_goals(view_user_id)
             # Add user info to goals
             for g in all_goals:
                 g['user_name'] = selected_user_obj['name']
@@ -6098,7 +6481,7 @@ def display_view_all_goals():
         all_goals = []  # Initialize empty list
         
         if role == 'HR':
-            all_users = db.get_all_users()
+            all_users = cached_get_all_users()
             selected_user = st.selectbox(
                 "Select User",
                 [f"{u['name']} ({u['email']})" for u in all_users],
@@ -6107,7 +6490,7 @@ def display_view_all_goals():
             user_email = selected_user.split('(')[1].strip(')')
             selected_user_obj = next(u for u in all_users if u['email'] == user_email)
             view_user_id = selected_user_obj['id']
-            all_goals = db.get_user_all_goals(view_user_id)
+            all_goals = cached_get_user_all_goals(view_user_id)
             # Add user info
             for g in all_goals:
                 g['user_name'] = selected_user_obj['name']
@@ -6116,7 +6499,7 @@ def display_view_all_goals():
         
         elif role == 'CMD':
             # CMD can view all users
-            all_users = db.get_all_users()
+            all_users = cached_get_all_users()
             selected_user = st.selectbox(
                 "Select User",
                 [f"{u['name']} ({u['role']}) - {u['email']}" for u in all_users],
@@ -6125,7 +6508,7 @@ def display_view_all_goals():
             user_email = selected_user.split(' - ')[1]
             selected_user_obj = next(u for u in all_users if u['email'] == user_email)
             view_user_id = selected_user_obj['id']
-            all_goals = db.get_user_all_goals(view_user_id)
+            all_goals = cached_get_user_all_goals(view_user_id)
             # Add user info
             for g in all_goals:
                 g['user_name'] = selected_user_obj['name']
@@ -6134,7 +6517,7 @@ def display_view_all_goals():
         
         elif role == 'VP':
             # VP can view VP, HR, Manager, Employee (not CMD)
-            all_users = db.get_all_users()
+            all_users = cached_get_all_users()
             viewable_users = [u for u in all_users if u['role'] in ['VP', 'HR', 'Manager', 'Employee']]
             selected_user = st.selectbox(
                 "Select User",
@@ -6144,7 +6527,7 @@ def display_view_all_goals():
             user_email = selected_user.split(' - ')[1]
             selected_user_obj = next(u for u in viewable_users if u['email'] == user_email)
             view_user_id = selected_user_obj['id']
-            all_goals = db.get_user_all_goals(view_user_id)
+            all_goals = cached_get_user_all_goals(view_user_id)
             # Add user info
             for g in all_goals:
                 g['user_name'] = selected_user_obj['name']
@@ -6152,7 +6535,7 @@ def display_view_all_goals():
                 g['user_department'] = selected_user_obj.get('department', 'N/A')
         
         elif role == 'Manager':
-            team_members = db.get_team_members(user['id'])
+            team_members = cached_get_team_members(user['id'])
             if team_members:
                 selected_user = st.selectbox(
                     "Select Team Member",
@@ -6161,7 +6544,7 @@ def display_view_all_goals():
                 )
                 if selected_user == user['name']:
                     view_user_id = user['id']
-                    all_goals = db.get_user_all_goals(view_user_id)
+                    all_goals = cached_get_user_all_goals(view_user_id)
                     # Add user info
                     for g in all_goals:
                         g['user_name'] = user['name']
@@ -6171,7 +6554,7 @@ def display_view_all_goals():
                     user_email = selected_user.split('(')[1].strip(')')
                     selected_user_obj = next(m for m in team_members if m['email'] == user_email)
                     view_user_id = selected_user_obj['id']
-                    all_goals = db.get_user_all_goals(view_user_id)
+                    all_goals = cached_get_user_all_goals(view_user_id)
                     # Add user info
                     for g in all_goals:
                         g['user_name'] = selected_user_obj['name']
@@ -6179,7 +6562,7 @@ def display_view_all_goals():
                         g['user_department'] = selected_user_obj.get('department', 'N/A')
             else:
                 view_user_id = user['id']
-                all_goals = db.get_user_all_goals(view_user_id)
+                all_goals = cached_get_user_all_goals(view_user_id)
                 # Add user info
                 for g in all_goals:
                     g['user_name'] = user['name']
@@ -6188,7 +6571,7 @@ def display_view_all_goals():
         
         else:  # Employee
             view_user_id = user['id']
-            all_goals = db.get_user_all_goals(view_user_id)
+            all_goals = cached_get_user_all_goals(view_user_id)
             # Add user info
             for g in all_goals:
                 g['user_name'] = user['name']
@@ -6285,8 +6668,9 @@ def display_view_all_goals():
             
             with col_delete:
                 if st.button("🗑️ Delete", key=f"delete_goal_{goal['goal_id']}", use_container_width=True):
-                    goal_owner = db.get_user_by_id(goal['user_id'])
+                    goal_owner = cached_get_user_by_id(goal['user_id'])
                     if db.delete_goal(goal['goal_id']):
+                        load_all_data.clear()
                         if goal_owner:
                             notify_goal_deleted(goal, user, goal_owner)
                         st.success("Goal deleted!")
@@ -6330,7 +6714,8 @@ def display_view_all_goals():
                         'status': new_status
                     }
                     if db.update_goal(edit_goal['goal_id'], updates):
-                        goal_owner = db.get_user_by_id(edit_goal['user_id'])
+                        load_all_data.clear()
+                        goal_owner = cached_get_user_by_id(edit_goal['user_id'])
                         if goal_owner:
                             notify_goal_edited(edit_goal, user, goal_owner)
                         st.success("✅ Goal updated!")
@@ -6373,19 +6758,19 @@ def display_hr_info():
                 st.session_state.view_all_goals_mode = 'organization'
                 st.rerun()
     
-    all_users = db.get_all_users()
+    all_users = cached_get_all_users()
 
     # Calculate all metrics first
     total_users = len(all_users)
-    total_goals = sum([len(db.get_user_all_goals(u['id'])) for u in all_users])
-    total_feedback = len(db.get_all_feedback())
+    total_goals = sum([len(cached_get_user_all_goals(u['id'])) for u in all_users])
+    total_feedback = len(cached_get_all_feedback())
     active_goals = len(db.get_all_active_goals())
 
     # Calculate overdue goals
     overdue_count = 0
     today = date.today()
     for u in all_users:
-        user_goals = db.get_user_all_goals(u['id'])
+        user_goals = cached_get_user_all_goals(u['id'])
         for goal in user_goals:
             if goal.get('status') == 'Active':
                 end_date_str = goal.get('end_date')
@@ -6596,10 +6981,10 @@ def display_hr_info():
             # Show all users table
             users_data = []
             for u in all_users:
-                stats = db.get_user_goal_stats(u['id'])
+                stats = cached_get_user_goal_stats(u['id'])
                 manager_name = "N/A"
                 if u.get('manager_id'):
-                    manager = db.get_user_by_id(u['manager_id'])
+                    manager = cached_get_user_by_id(u['manager_id'])
                     if manager:
                         manager_name = manager['name']
                 
@@ -6629,7 +7014,7 @@ def display_hr_info():
             # Show all goals
             all_goals_list = []
             for u in all_users:
-                user_goals = db.get_user_all_goals(u['id'])
+                user_goals = cached_get_user_all_goals(u['id'])
                 for goal in user_goals:
                     goal['user_name'] = u['name']
                     goal['user_role'] = u['role']
@@ -6674,13 +7059,13 @@ def display_hr_info():
         
         elif detail_type == 'hr_feedback':
             # Show all feedback
-            all_feedback = db.get_all_feedback()
+            all_feedback = cached_get_all_feedback()
             
             if all_feedback:
                 feedback_data = []
                 for fb in all_feedback:
                     # Get user info
-                    fb_user = db.get_user_by_id(fb.get('user_id'))
+                    fb_user = cached_get_user_by_id(fb.get('user_id'))
                     user_name = fb_user['name'] if fb_user else 'Unknown'
                     
                     feedback_data.append({
@@ -6709,7 +7094,7 @@ def display_hr_info():
             # Show active goals
             active_goals_list = []
             for u in all_users:
-                user_goals = db.get_user_all_goals(u['id'])
+                user_goals = cached_get_user_all_goals(u['id'])
                 for goal in user_goals:
                     if goal.get('status') == 'Active':
                         goal['user_name'] = u['name']
@@ -6758,7 +7143,7 @@ def display_hr_info():
             today = date.today()
             
             for u in all_users:
-                user_goals = db.get_user_all_goals(u['id'])
+                user_goals = cached_get_user_all_goals(u['id'])
                 for goal in user_goals:
                     if goal.get('status') == 'Active':
                         end_date_str = goal.get('end_date')
@@ -6837,9 +7222,9 @@ def display_hr_info():
 
     with col_right:
         st.markdown("####  Goals Performance")
-        total_goals_org = sum([len(db.get_user_all_goals(u['id'])) for u in all_users])
-        completed_goals_org = sum([db.get_user_goal_stats(u['id']).get('completed_goals', 0) for u in all_users])
-        active_goals_org = sum([db.get_user_goal_stats(u['id']).get('active_goals', 0) for u in all_users])
+        total_goals_org = sum([len(cached_get_user_all_goals(u['id'])) for u in all_users])
+        completed_goals_org = sum([cached_get_user_goal_stats(u['id']).get('completed_goals', 0) for u in all_users])
+        active_goals_org = sum([cached_get_user_goal_stats(u['id']).get('active_goals', 0) for u in all_users])
 
         fig_goals = go.Figure(data=[
             go.Bar(name='Total', x=['Goals'], y=[total_goals_org], marker_color='#3b82f6'),
@@ -6863,10 +7248,10 @@ def display_hr_info():
         
         users_data = []
         for u in all_users:
-            stats = db.get_user_goal_stats(u['id'])
+            stats = cached_get_user_goal_stats(u['id'])
             manager_name = "N/A"
             if u.get('manager_id'):
-                manager = db.get_user_by_id(u['manager_id'])
+                manager = cached_get_user_by_id(u['manager_id'])
                 if manager:
                     manager_name = manager['name']
             
@@ -6947,7 +7332,7 @@ def display_hr_info():
             if dept not in dept_stats:
                 dept_stats[dept] = {'users': 0, 'goals': 0, 'completed': 0}
             dept_stats[dept]['users'] += 1
-            stats = db.get_user_goal_stats(u['id'])
+            stats = cached_get_user_goal_stats(u['id'])
             dept_stats[dept]['goals'] += stats.get('total_goals', 0)
             dept_stats[dept]['completed'] += stats.get('completed_goals', 0)
         
@@ -6986,7 +7371,7 @@ def display_hr_info():
         # Get goals based on filter
         if filter_type == "All Users":
             for u in all_users:
-                all_goals.extend(db.get_user_all_goals(u['id']))
+                all_goals.extend(cached_get_user_all_goals(u['id']))
         
         elif filter_type == "Specific User":
             with col_filter2:
@@ -6998,7 +7383,7 @@ def display_hr_info():
             
             user_email = selected_user.split(' - ')[1]
             selected_user_obj = next(u for u in all_users if u['email'] == user_email)
-            all_goals = db.get_user_all_goals(selected_user_obj['id'])
+            all_goals = cached_get_user_all_goals(selected_user_obj['id'])
         
         else:  # By Department
             with col_filter2:
@@ -7013,7 +7398,7 @@ def display_hr_info():
             # Get users from selected department
             dept_users = [u for u in all_users if u.get('department') == selected_dept]
             for u in dept_users:
-                all_goals.extend(db.get_user_all_goals(u['id']))
+                all_goals.extend(cached_get_user_all_goals(u['id']))
         
         # Display filter info
         if filter_type == "All Users":
@@ -7074,7 +7459,7 @@ def display_hr_info():
                 goal_data = []
                 for goal in filtered_goals:
                     # Get user info
-                    goal_user = db.get_user_by_id(goal['user_id'])
+                    goal_user = cached_get_user_by_id(goal['user_id'])
                     user_name = goal_user['name'] if goal_user else 'Unknown'
                     
                     monthly_achievement = goal.get('monthly_achievement')
@@ -7148,7 +7533,7 @@ def display_hr_info():
         
         # Get feedback based on filter
         if selected_user_filter == "All Users":
-            all_feedback = db.get_all_feedback()
+            all_feedback = cached_get_all_feedback()
             filter_display = "All Users"
         else:
             user_email = selected_user_filter.split('(')[1].strip(')')
@@ -7202,14 +7587,15 @@ def display_hr_info():
 def display_employees_page():
     """Display employees with hierarchical drill-down"""
     user = st.session_state.user
-    role = user['role']
     
     if not user:
         st.warning("⚠️ Session expired. Please login again.")
         st.rerun()
 
+    role = user['role']
+
     # Get all users
-    all_users = db.get_all_users()
+    all_users = cached_get_all_users()
     
     # Determine what to show based on role
     if role == 'CMD':
@@ -7222,7 +7608,7 @@ def display_employees_page():
         view_title = "Managers & My Team"
         employees = [u for u in all_users if u['role'] == 'Manager']  # default
     elif role == 'Manager':
-        employees = db.get_team_members(user['id'])
+        employees = cached_get_team_members(user['id'])
         view_title = "My Team"
     else:
         st.warning("⚠️ You don't have permission to view this page")
@@ -7298,7 +7684,7 @@ def display_employees_page():
     cols = st.columns(3)
     for idx, emp in enumerate(filtered_employees):
         with cols[idx % 3]:
-            stats = db.get_user_goal_stats(emp['id'])
+            stats = cached_get_user_goal_stats(emp['id'])
             
             # Role-based badge colors
             role_colors = {
@@ -7433,12 +7819,12 @@ def display_employees_page():
                 new_department = st.text_input("Department", value=edit_emp.get('department', ''))
                 
                 # Manager assignment
-                managers = [u for u in db.get_all_users() if u['role'] == 'Manager' and u['id'] != edit_emp['id']]
+                managers = [u for u in cached_get_all_users() if u['role'] == 'Manager' and u['id'] != edit_emp['id']]
                 manager_options = ["None"] + [f"{m['name']} ({m['email']})" for m in managers]
                 
                 current_manager_idx = 0
                 if edit_emp.get('manager_id'):
-                    current_manager = db.get_user_by_id(edit_emp['manager_id'])
+                    current_manager = cached_get_user_by_id(edit_emp['manager_id'])
                     if current_manager:
                         current_manager_str = f"{current_manager['name']} ({current_manager['email']})"
                         if current_manager_str in manager_options:
@@ -7466,6 +7852,7 @@ def display_employees_page():
                         }
                         
                         if db.update_user(edit_emp['id'], updates):
+                            load_all_data.clear()
                             st.success(f"✅ Employee {new_name} updated successfully!")
                             # No notification needed for employee creation per new requirements
                             del st.session_state.editing_employee
@@ -7508,7 +7895,7 @@ def display_employees_page():
             st.info(f"**Role:** {del_emp['role']}")
         
         # Get stats
-        emp_goals = db.get_user_all_goals(del_emp['id'])
+        emp_goals = cached_get_user_all_goals(del_emp['id'])
         st.warning(f" This will delete **{len(emp_goals)} goals** associated with this employee")
         
         confirm = st.checkbox("I understand this action cannot be undone", key="confirm_emp_delete")
@@ -7524,6 +7911,7 @@ def display_employees_page():
                 key="execute_emp_delete"
             ):
                 if db.delete_user(del_emp['id']):
+                    load_all_data.clear()
                     st.success(f"✅ Employee {del_emp['name']} deleted successfully!")
                     # No notification needed for employee creation per new requirements
                     del st.session_state.deleting_employee
@@ -7564,30 +7952,63 @@ def display_vp_team_view():
         st.title(f"👥 {vp['name']}'s Team")
     
     # Get all employees under this VP (all employees managed by managers under this VP)
-    all_users = db.get_all_users()
+    all_users = cached_get_all_users()
     
-    # Get all managers under this VP
+    # Get all managers directly under this VP
     vp_managers = [u for u in all_users if u['role'] == 'Manager' and u.get('manager_id') == vp['id']]
     
-    # Get all employees under those managers
+    seen_emp_ids = set()
     vp_employees = []
+
+    # Get employees under VP's managers
     for manager in vp_managers:
-        team_members = db.get_team_members(manager['id'])
-        vp_employees.extend(team_members)
-    
+        team_members = cached_get_team_members(manager['id'])
+        for member in team_members:
+            if member['id'] not in seen_emp_ids:
+                seen_emp_ids.add(member['id'])
+                vp_employees.append(member)
+
+    # Get employees directly assigned to this VP
+    direct_reports = cached_get_team_members(vp['id'])
+    for member in direct_reports:
+        if member['id'] not in seen_emp_ids:
+            seen_emp_ids.add(member['id'])
+            vp_employees.append(member)
+
+    # Also include any CMD/VP/HR/Manager directly assigned to this VP
+    other_reports = [u for u in all_users 
+                     if u.get('manager_id') == vp['id'] 
+                     and u['id'] not in seen_emp_ids]
+    for member in other_reports:
+        seen_emp_ids.add(member['id'])
+        vp_employees.append(member)
+
     if not vp_employees:
-        st.info(f"No employees found under {vp['name']}")
+        st.info(f"No team members found under {vp['name']}")
         return
     
     st.markdown(f"**Total Team Members: {len(vp_employees)}**")
     st.markdown("---")
     
+    
     # Display employee cards
     cols = st.columns(3)
     for idx, emp in enumerate(vp_employees):
         with cols[idx % 3]:
-            stats = db.get_user_goal_stats(emp['id'])
+            stats = cached_get_user_goal_stats(emp['id'])
             
+             # Role badge color
+            role_colors = {
+                'CMD': '#8B0000',
+                'VP': '#FF4500',
+                'HR': '#4facfe',
+                'Manager': '#f093fb',
+                'Employee': '#dbeafe'
+            }
+            role_color = role_colors.get(emp['role'], '#dbeafe')
+            role_text_color = '#ffffff' if emp['role'] != 'Employee' else '#1e40af'
+            
+
             st.markdown(f"""
             <div class='hierarchy-card'>
                 <div style='text-align: center;'>
@@ -7597,12 +8018,12 @@ def display_vp_team_view():
                         {emp['name'][0].upper()}
                     </div>
                     <h3 style='margin: 5px 0;'>{emp['name']}</h3>
-                    <p style='color: #64748b; font-size: 14px;'>{emp.get('designation', 'Employee')}</p>
+                    <p style='color: #64748b; font-size: 14px;'>{emp.get('designation', emp['role'])}</p>
                     <p style='color: #64748b; font-size: 12px;'>{emp.get('department', 'N/A')}</p>
                     <div style='margin-top: 10px;'>
-                        <span style='background: #dbeafe; color: #1e40af; padding: 3px 10px; 
+                        <span style='background: {role_color}; color: {role_text_color}; padding: 3px 10px; 
                                      border-radius: 10px; font-size: 11px; font-weight: bold;'>
-                            Employee
+                            {emp['role']}
                         </span>
                     </div>
                     <div style='margin-top: 15px; font-size: 13px;'>
@@ -7647,7 +8068,7 @@ def display_hr_team_view():
         st.title(f"👥 {hr['name']}'s Team")
     
     # Get all employees under this HR (employees managed by this HR directly)
-    hr_employees = db.get_team_members(hr['id'])
+    hr_employees = cached_get_team_members(hr['id'])
     
     if not hr_employees:
         st.info(f"No employees found under {hr['name']}")
@@ -7660,7 +8081,7 @@ def display_hr_team_view():
     cols = st.columns(3)
     for idx, emp in enumerate(hr_employees):
         with cols[idx % 3]:
-            stats = db.get_user_goal_stats(emp['id'])
+            stats = cached_get_user_goal_stats(emp['id'])
             
             st.markdown(f"""
             <div class='hierarchy-card'>
@@ -7721,7 +8142,7 @@ def display_manager_team_view():
         st.title(f"👥 {manager['name']}'s Team")
     
     # Get team members
-    team_members = db.get_team_members(manager['id'])
+    team_members = cached_get_team_members(manager['id'])
     
     if not team_members:
         st.info(f"No team members found under {manager['name']}")
@@ -7734,7 +8155,7 @@ def display_manager_team_view():
     cols = st.columns(3)
     for idx, emp in enumerate(team_members):
         with cols[idx % 3]:
-            stats = db.get_user_goal_stats(emp['id'])
+            stats = cached_get_user_goal_stats(emp['id'])
             
             st.markdown(f"""
             <div class='hierarchy-card'>
@@ -7771,7 +8192,7 @@ def display_quick_assign_goal_form(user, employees):
     """Quick assign goal form in employees page"""
     # Filter based on role hierarchy
     if user['role'] == 'HR':
-        employees = [e for e in employees if e.get('manager_id') == user['id']]
+        employees = cached_get_team_members(user['id'])
         if not employees:
             st.info("You can only assign goals to employees in your team.")
             return
@@ -7875,8 +8296,9 @@ def display_quick_assign_goal_form(user, employees):
                 }
                 
                 if db.create_goal(goal_data):
+                    load_all_data.clear()
                     # Get assigned employee
-                    assigned_emp = db.get_user_by_id(emp_id)
+                    assigned_emp = cached_get_user_by_id(emp_id)
                     if assigned_emp:
                         # Create goal data for notification
                         assigned_goal_data = {
@@ -7895,19 +8317,20 @@ def get_organization_month_goals(month=None, year=None):
         month = today.month
         year = today.year
     
-    all_users = db.get_all_users()
-    month_goals = []
+    all_goals = load_all_data()['goals']
+    user_map = {u['id']: u for u in load_all_data()['users']}
     
-    for user in all_users:
-        user_goals = db.get_user_all_goals(user['id'])
-        for goal in user_goals:
-            if goal['year'] == year and goal.get('month') == month:
-                goal['user_name'] = user['name']
-                goal['user_role'] = user['role']
-                goal['user_department'] = user.get('department', 'N/A')
-                month_goals.append(goal)
+    month_goals = []
+    for goal in all_goals:
+        if goal['year'] == year and goal.get('month') == month:
+            u = user_map.get(goal['user_id'], {})
+            goal['user_name'] = u.get('name', 'Unknown')
+            goal['user_role'] = u.get('role', 'N/A')
+            goal['user_department'] = u.get('department', 'N/A')
+            month_goals.append(goal)
     
     return month_goals
+
 
 def get_user_month_goals(user_id, month=None, year=None):
     """Get user's goals for a specific month"""
@@ -7916,7 +8339,7 @@ def get_user_month_goals(user_id, month=None, year=None):
         month = today.month
         year = today.year
     
-    all_goals = db.get_user_all_goals(user_id)
+    all_goals = cached_get_user_all_goals(user_id)
     month_goals = [g for g in all_goals if g['year'] == year and g.get('month') == month]
     
     return month_goals
@@ -7954,7 +8377,7 @@ def display_employee_goals():
     sorted_years = sorted(years.items(), reverse=True)
     for year, summary in sorted_years:
         # Get goal count for this year
-        year_goals = [g for g in db.get_user_all_goals(emp['id']) if g['year'] == year]
+        year_goals = [g for g in cached_get_user_all_goals(emp['id']) if g['year'] == year]
         goal_count = len(year_goals)
         
         st.markdown(f"""
@@ -8363,7 +8786,7 @@ def display_my_goals():
         st.markdown("---")
         st.markdown(f"### 📅 {search_month} Goals ")
         
-        all_goals = db.get_user_all_goals(user['id'])
+        all_goals = cached_get_user_all_goals(user['id'])
         month_goals = [g for g in all_goals if g.get('month') == month_num]
         
         if month_goals:
@@ -8461,7 +8884,7 @@ def display_my_goals():
             st.error("This will delete ALL goals and data for this year. This action cannot be undone!")
             
             # Show year stats
-            year_goals = [g for g in db.get_user_all_goals(user['id']) if g['year'] == delete_year]
+            year_goals = [g for g in cached_get_user_all_goals(user['id']) if g['year'] == delete_year]
             st.info(f" This year has **{len(year_goals)} goal(s)** that will be deleted.")
             
             confirm_delete = st.checkbox("I understand this action cannot be undone", key="confirm_year_delete")
@@ -8486,7 +8909,7 @@ def display_my_goals():
     
     # Show rejected goals for employees
     if user['role'] == 'Employee':
-        all_user_goals = db.get_user_all_goals(user['id'])
+        all_user_goals = cached_get_user_all_goals(user['id'])
         rejected_goals = [g for g in all_user_goals if g.get('approval_status') == 'rejected']
         
         if rejected_goals:
@@ -8549,7 +8972,7 @@ def display_quarter_selection():
             with col_menu:
                 with st.popover("⋮", use_container_width=True):
                     st.markdown("**View Team Member:**")
-                    team_members = db.get_team_members(emp['id'])
+                    team_members = cached_get_team_members(emp['id'])
                     if team_members:
                         for member in team_members:
                             if st.button(
@@ -8630,7 +9053,7 @@ def display_quarter_selection():
     cols = st.columns(2)
     for idx, (quarter, summary) in enumerate(sorted(quarters.items())):
         with cols[idx % 2]:
-            quarter_goals = [g for g in db.get_user_all_goals(user_id) if g['year'] == year and g.get('quarter') == quarter]
+            quarter_goals = [g for g in cached_get_user_all_goals(user_id) if g['year'] == year and g.get('quarter') == quarter]
             goal_count = len(quarter_goals)
             
             st.markdown(f"""
@@ -8695,7 +9118,7 @@ def display_month_selection():
                     st.markdown("**View Team Member:**")
                     
                     # Get team members under this manager
-                    team_members = db.get_team_members(emp['id'])
+                    team_members = cached_get_team_members(emp['id'])
                     
                     if team_members:
                         for member in team_members:
@@ -8748,7 +9171,7 @@ def display_month_selection():
         with cols[idx]:
             month_name = get_month_name(month_num)
             summary = months.get(month_num, "")
-            month_goals = db.get_month_goals(user_id, year, quarter, month_num)
+            month_goals = cached_get_month_goals(user_id, year, quarter, month_num)
             goal_count = len(month_goals)
 
             st.markdown(f"""
@@ -8849,7 +9272,7 @@ def display_month_goals():
                     st.markdown("**View Team Member:**")
                     
                     # Get team members under this manager
-                    team_members = db.get_team_members(viewing_employee['id'])
+                    team_members = cached_get_team_members(viewing_employee['id'])
                     
                     if team_members:
                         for member in team_members:
@@ -8919,7 +9342,7 @@ def display_month_goals():
 def export_goals_to_excel(user_id, year, quarter, month):
     """Export goals to Excel with proper formatting including Monthly Achievement"""
     
-    goals = db.get_month_goals(user_id, year, quarter, month)
+    goals = cached_get_month_goals(user_id, year, quarter, month)
     
     if not goals:
         st.warning("No goals to export")
@@ -9157,7 +9580,7 @@ def check_and_auto_complete_goal(goal_id):
         
         if result:
             # Get user info for notification
-            user = db.get_user_by_id(goal['user_id'])
+            user = cached_get_user_by_id(goal['user_id'])
             if user:
                 notify_goal_completed(goal, user)
         
@@ -9184,7 +9607,7 @@ def display_monthly_view(user, year, quarter, month, is_read_only=False):
             display_assign_goal_form_monthly(user, year, quarter, month)
     
     # Get goals - only show approved goals for employees
-    all_goals = db.get_month_goals(user['id'], year, quarter, month)
+    all_goals = cached_get_month_goals(user['id'], year, quarter, month)
 
     if user['role'] == 'Employee':
         # Show only approved goals
@@ -9883,6 +10306,7 @@ def display_monthly_view(user, year, quarter, month, is_read_only=False):
         # ===== UPDATE ACHIEVEMENTS TAB =====
         
         if action_tab1:
+            with action_tab1:
                 st.subheader("Update Weekly Achievements")
                 
                 selected_goal_title = st.selectbox(
@@ -10016,12 +10440,13 @@ def display_monthly_view(user, year, quarter, month, is_read_only=False):
                         }
                         
                         if db.update_goal(selected_goal['goal_id'], updates):
+                            load_all_data.clear()
                             st.success("✅ Achievements submitted for manager approval!")
                             st.info("💡 Your manager will review these achievements before they appear in the goal sheet")
                             
                             # Send email to manager
                             if user.get('manager_id'):
-                                manager = db.get_user_by_id(user['manager_id'])
+                                manager = cached_get_user_by_id(user['manager_id'])
                                 if manager and manager.get('email'):
                                     send_achievement_approval_email(
                                         manager['email'],
@@ -10050,6 +10475,7 @@ def display_monthly_view(user, year, quarter, month, is_read_only=False):
                         }
                         
                         if db.update_goal(selected_goal['goal_id'], updates):
+                            load_all_data.clear()
                             st.success("✅ Achievements and ratings saved to monthly goal sheet!")
                             if check_and_auto_complete_goal(selected_goal['goal_id']):
                                 st.success("🎉 Goal completed - Monthly target achieved!")
@@ -10206,8 +10632,9 @@ def display_monthly_view(user, year, quarter, month, is_read_only=False):
                             }
                                 
                             if db.update_goal(edit_goal['goal_id'], updates):
+                                load_all_data.clear()
                                 st.success("✅ Goal updated successfully!")
-                                goal_owner = db.get_user_by_id(edit_goal['user_id'])
+                                goal_owner = cached_get_user_by_id(edit_goal['user_id'])
                                 if goal_owner:
                                     notify_goal_edited(edit_goal, user, goal_owner)
                                 st.rerun()
@@ -10215,7 +10642,6 @@ def display_monthly_view(user, year, quarter, month, is_read_only=False):
                                 st.error("❌ Failed to update goal")
                         else:
                             st.error("❌ Please fill all required fields (Department, Title, KPI)")
-                   
         
         # ===== DELETE GOAL TAB =====
         if not is_read_only and action_tab3:
@@ -10254,8 +10680,9 @@ def display_monthly_view(user, year, quarter, month, is_read_only=False):
                         type="primary"
                     ):
                         if db.delete_goal(delete_goal['goal_id']):
+                            load_all_data.clear()
                             st.success("✅ Goal deleted successfully!")
-                            goal_owner = db.get_user_by_id(delete_goal['user_id'])
+                            goal_owner = cached_get_user_by_id(delete_goal['user_id'])
                             if goal_owner:
                                 notify_goal_deleted(delete_goal, user, goal_owner)
                             st.rerun()
@@ -10274,6 +10701,7 @@ def display_monthly_view(user, year, quarter, month, is_read_only=False):
         display_feedback_section(goals, 'month')
 
     
+    
 def display_assign_goal_form_monthly(user, year, quarter, month):
     """Form to assign goals in monthly view"""
     with st.form("assign_goal_monthly"):
@@ -10282,17 +10710,17 @@ def display_assign_goal_form_monthly(user, year, quarter, month):
         # Get employees based on role
         if user['role'] == 'HR':
             # HR can only assign to their own team members
-            employees = db.get_team_members(user['id'])
+            employees = cached_get_team_members(user['id'])
         elif user['role'] == 'VP':
             # VP can only assign to HR and Manager
-            all_users = db.get_all_users()
+            all_users = cached_get_all_users()
             employees = [u for u in all_users if u['role'] in ['HR', 'Manager']]
         elif user['role'] == 'CMD':
             # CMD can only assign to VP
-            all_users = db.get_all_users()
+            all_users = cached_get_all_users()
             employees = [u for u in all_users if u['role'] == 'VP']
         else:  # Manager
-            employees = db.get_team_members(user['id'])
+            employees = cached_get_team_members(user['id'])
         
         if not employees:
             st.info("No employees available")
@@ -10364,15 +10792,16 @@ def display_assign_goal_form_monthly(user, year, quarter, month):
                     'week3_remarks': w3_rating,  # ✅ ADD
                     'week4_remarks': w4_rating,
                     'start_date': f'{year}-{month:02d}-01',
-                    'end_date': f'{year}-{month:02d}-28',
+                    'end_date': f'{year}-{month:02d}-{calendar.monthrange(year, month)[1]}',
                     'created_by': user['id']
                 }
                 
                 if db.create_goal(goal_data):
+                    load_all_data.clear()
                     st.success(f"✅ Goal assigned to {selected_emp}")
     
                     # Notify about goal creation
-                    assigned_emp = db.get_user_by_id(emp_id)
+                    assigned_emp = cached_get_user_by_id(emp_id)
                     if assigned_emp:
                         notify_goal_created(goal_data, user)
                     st.rerun()
@@ -10407,28 +10836,28 @@ def display_feedback_history():
         with st.form("add_new_feedback_form"):
             # Get all goals based on role
             if role == 'HR':
-                all_users = db.get_all_users()
+                all_users = cached_get_all_users()
                 all_goals = []
                 for u in all_users:
-                    user_goals = db.get_user_all_goals(u['id'])
+                    user_goals = cached_get_user_all_goals(u['id'])
                     for g in user_goals:
                         g['user_name'] = u['name']
                     all_goals.extend(user_goals)
             elif role == 'Manager':
-                team_members = db.get_team_members(user['id'])
+                team_members = cached_get_team_members(user['id'])
                 all_goals = []
                 for m in team_members:
-                    member_goals = db.get_user_all_goals(m['id'])
+                    member_goals = cached_get_user_all_goals(m['id'])
                     for g in member_goals:
                         g['user_name'] = m['name']
                     all_goals.extend(member_goals)
                 # Add own goals
-                own_goals = db.get_user_all_goals(user['id'])
+                own_goals = cached_get_user_all_goals(user['id'])
                 for g in own_goals:
                     g['user_name'] = user['name']
                 all_goals.extend(own_goals)
             else:
-                all_goals = db.get_user_all_goals(user['id'])
+                all_goals = cached_get_user_all_goals(user['id'])
                 for g in all_goals:
                     g['user_name'] = user['name']
             
@@ -10487,12 +10916,12 @@ def display_feedback_history():
     
     # Get feedback based on role
     if role == 'HR':
-        all_feedbacks = db.get_all_feedback()
+        all_feedbacks = cached_get_all_feedback()
         st.subheader("All Feedback (System-wide)")
     elif role == 'Manager':
         my_feedback = db.get_user_all_feedback(user['id'])
         team_feedback = []
-        for member in db.get_team_members(user['id']):
+        for member in cached_get_team_members(user['id']):
             team_feedback.extend(db.get_user_all_feedback(member['id']))
         all_feedbacks = my_feedback + team_feedback
         st.subheader("My Feedback & Team Feedback")
@@ -10529,7 +10958,7 @@ def display_feedback_history():
     
     for feedback in filtered:
         # Get user who received feedback
-        feedback_user = db.get_user_by_id(feedback.get('user_id'))
+        feedback_user = cached_get_user_by_id(feedback.get('user_id'))
         feedback_user_name = feedback_user['name'] if feedback_user else 'Unknown'
         
         is_new = False
@@ -10582,7 +11011,7 @@ def display_feedback_history():
                                     }
                                     if db.create_feedback_reply(reply_data):
                                         # Notify the original feedback giver
-                                        feedback_giver = db.get_user_by_id(feedback.get('feedback_by'))
+                                        feedback_giver = cached_get_user_by_id(feedback.get('feedback_by'))
                                         if feedback_giver:
                                             notify_feedback_reply(feedback, user, feedback_giver)
                                         
@@ -10640,7 +11069,7 @@ def display_week_view(user, year, quarter, month, week_num):
     st.subheader(f"📅 Week {week_num} - {month_name} {year}")
     
     # Get monthly goals to show breakdown
-    monthly_goals = db.get_month_goals(user['id'], year, quarter, month)
+    monthly_goals = cached_get_month_goals(user['id'], year, quarter, month)
     
     if monthly_goals:
         st.markdown("**Weekly Breakdown from Monthly Goals**")
@@ -10810,7 +11239,8 @@ def display_week_view(user, year, quarter, month, week_num):
                         }
                         
                         if db.update_goal(edit_week_goal['goal_id'], updates):
-                            goal_owner = db.get_user_by_id(edit_week_goal['user_id'])
+                            load_all_data.clear()
+                            goal_owner = cached_get_user_by_id(edit_week_goal['user_id'])
                             if goal_owner:
                                 notify_goal_edited(edit_week_goal, user, goal_owner)
                             st.success("✅ Week goal updated!")
@@ -10835,8 +11265,9 @@ def display_week_view(user, year, quarter, month, week_num):
             confirm = st.checkbox("I understand this cannot be undone", key=f"confirm_week_del_{week_num}")
             
             if st.button("🗑️ Delete Goal", disabled=not confirm, use_container_width=True):
-                goal_owner = db.get_user_by_id(delete_week_goal['user_id'])
+                goal_owner = cached_get_user_by_id(delete_week_goal['user_id'])
                 if db.delete_goal(delete_week_goal['goal_id']):
+                    load_all_data.clear()
                     if goal_owner:
                         notify_goal_deleted(delete_week_goal, user, goal_owner)
                     st.success("✅ Week goal deleted!")
@@ -10871,6 +11302,7 @@ def display_week_view(user, year, quarter, month, week_num):
                             'end_date': str(date.today())
                         }
                         if db.create_goal(goal_data):
+                            load_all_data.clear()
                             st.success("✅ Goal created!")
                             st.rerun()
                     else:
@@ -11033,9 +11465,10 @@ def display_add_goal_form_inline(user, year, quarter, month):
                     }
                     
                     if db.create_goal(goal_data):
+                        load_all_data.clear()
                         if user['role'] == 'Employee':
                             if user.get('manager_id'):
-                                manager = db.get_user_by_id(user['manager_id'])
+                                manager = cached_get_user_by_id(user['manager_id'])
                                 if manager and manager.get('email'):
                                     send_goal_approval_email(
                                         manager['email'],
@@ -11048,7 +11481,7 @@ def display_add_goal_form_inline(user, year, quarter, month):
                                     st.warning(f"✅ Goal created! But manager email not found.")
                             else:
                                 # No manager assigned — send approval request to all HR users
-                                all_users = db.get_all_users()
+                                all_users = cached_get_all_users()
                                 hr_users = [u for u in all_users if u['role'] == 'HR']
                                 if hr_users:
                                     for hr in hr_users:
@@ -11084,7 +11517,7 @@ def display_feedback_section(goals, level):
 
     user = st.session_state.user
     target_user_id = goals[0]['user_id']
-    target_user = db.get_user_by_id(target_user_id)
+    target_user = cached_get_user_by_id(target_user_id)
     if not target_user:
         st.error("User not found")
         return
@@ -11124,7 +11557,7 @@ def display_feedback_section(goals, level):
         if not fb.get('feedback_by_name'):
             feedback_by_id = fb.get('feedback_by')
             if feedback_by_id:
-                giver = db.get_user_by_id(feedback_by_id)
+                giver = cached_get_user_by_id(feedback_by_id)
                 fb['feedback_by_name'] = giver['name'] if giver else 'Unknown'
             else:
                 fb['feedback_by_name'] = 'Unknown'
@@ -11142,7 +11575,7 @@ def display_feedback_section(goals, level):
             
             # Get the actual feedback giver's name
             feedback_by_id = fb.get('feedback_by')
-            feedback_giver = db.get_user_by_id(feedback_by_id) if feedback_by_id else None
+            feedback_giver = cached_get_user_by_id(feedback_by_id) if feedback_by_id else None
             feedback_giver_name = fb.get('feedback_by_name', 'Unknown')
             
             # Format the created_at date properly
@@ -11247,7 +11680,7 @@ def display_feedback_section(goals, level):
                                     }
                                     if db.create_feedback_reply(reply_data):
                                         # Notify the original feedback giver
-                                        feedback_giver = db.get_user_by_id(fb.get('feedback_by'))
+                                        feedback_giver = cached_get_user_by_id(fb.get('feedback_by'))
                                         if feedback_giver:
                                             notify_feedback_reply(fb, user, feedback_giver)
                                         
@@ -11291,7 +11724,7 @@ def display_feedback_section(goals, level):
                         }
                         if db.create_feedback(feedback_data):
                             # Notify goal owner
-                            goal_owner = db.get_user_by_id(target_user_id)
+                            goal_owner = cached_get_user_by_id(target_user_id)
                             if goal_owner:
                                 notify_feedback_given(selected_goal, user, goal_owner)
                             
@@ -11338,6 +11771,7 @@ def display_profile():
                     }
                     
                     if db.update_user(user['id'], updates):
+                        load_all_data.clear()
                         st.session_state.user.update(updates)
                         st.success("✅ Profile updated successfully!")
                         st.rerun()
@@ -11385,6 +11819,7 @@ def display_profile():
                                 score, _, strength, _ = check_password_strength(new_password)
                                 
                                 if db.update_user(user['id'], {'password': new_password}):
+                                    load_all_data.clear()
                                     st.session_state.user['password'] = new_password
                                     st.session_state.temp_new_password = ""
                                     st.success("✅ Password changed successfully!")
@@ -11524,7 +11959,7 @@ def display_permissions():
     
     st.info("**Note:** This section allows HR to manage granular permissions for users")
     
-    all_users = db.get_all_users()
+    all_users = cached_get_all_users()
     
     # Permission categories
     permissions = {
@@ -11568,6 +12003,7 @@ def display_permissions():
             
             if st.form_submit_button("💾 Update Permissions", use_container_width=True):
                 if db.update_user_permissions(selected_user_obj['id'], selected_perms):
+                    load_all_data.clear()
                     st.success(f"✅ Permissions updated for {selected_user_obj['name']}")
                     st.rerun()
                 else:
@@ -11596,7 +12032,7 @@ def display_employee_management():
         st.warning("⚠️ You don't have permission to access this page")
         return
     
-    st.title(" Employee Management")
+    st.title("⚙️ Employee Management")
     
     tab1, tab2, tab3, tab4 = st.tabs(["👤 Create Employee", "👥 All Employees", "👥 Manage Teams", "📋 View All Teams"])
     
@@ -11621,15 +12057,15 @@ def display_employee_management():
                 new_department = st.text_input("Department")
                 new_joining_date = st.date_input("Joining Date*", value=date.today())
                 
-                managers = [u for u in db.get_all_users() if u['role'] == 'Manager']
-                manager_options = ["None"] + [f"{m['name']} ({m['email']})" for m in managers]
-                selected_manager = st.selectbox("Assign to Manager", manager_options)
+                managers = [u for u in cached_get_all_users() if u['role'] in ['CMD', 'VP', 'HR', 'Manager']]
+                manager_options = ["None"] + [f"{m['name']} ({m['role']}) ({m['email']})" for m in managers]
+                selected_manager = st.selectbox("Assign Supervisor", manager_options)
             
             if st.form_submit_button("Create Employee", use_container_width=True):
                 if new_name and new_email and new_password and new_role:
                     manager_id = None
                     if selected_manager != "None":
-                        manager_email = selected_manager.split('(')[1].strip(')')
+                        manager_email = selected_manager.split('(')[-1].strip(')')
                         manager_id = next((m['id'] for m in managers if m['email'] == manager_email), None)
                     
                     employee_data = {
@@ -11644,6 +12080,7 @@ def display_employee_management():
                     }
                     
                     if db.create_user(employee_data):
+                        load_all_data.clear()
                         st.success(f"✅ Employee {new_name} created successfully!")
                         # No notification needed for employee creation per new requirements
                     else:
@@ -11662,11 +12099,11 @@ def display_employee_management():
         with col_search2:
             filter_role = st.selectbox("Filter by Role", ["All"] + ["CMD", "VP", "HR", "Manager", "Employee"], key="all_emp_role")
         with col_search3:
-            all_depts = list(set([normalize_department(u.get('department')) for u in db.get_all_users()]))
+            all_depts = list(set([normalize_department(u.get('department')) for u in cached_get_all_users()]))
             filter_dept = st.selectbox("Filter by Department", 
                 ["All"] + sorted([d for d in all_depts if d != 'UNASSIGNED']))
         
-        all_users_list = db.get_all_users()
+        all_users_list = cached_get_all_users()
         
         # Apply filters
         filtered_users = all_users_list
@@ -11751,7 +12188,7 @@ def display_employee_management():
                 
                 # Manager info
                 if view_emp.get('manager_id'):
-                    manager = db.get_user_by_id(view_emp['manager_id'])
+                    manager = cached_get_user_by_id(view_emp['manager_id'])
                     st.info(f"**Manager:** {manager['name'] if manager else 'N/A'}")
                 else:
                     st.info("**Manager:** None")
@@ -11797,12 +12234,12 @@ def display_employee_management():
                             edit_exit_date = None
                         
                         # Manager assignment
-                        managers = [u for u in db.get_all_users() if u['role'] == 'Manager' and u['id'] != view_emp['id']]
-                        manager_options = ["None"] + [f"{m['name']} ({m['email']})" for m in managers]
+                        managers = [u for u in cached_get_all_users() if u['role'] in ['CMD', 'VP', 'HR', 'Manager'] and u['id'] != view_emp['id']]
+                        manager_options = ["None"] + [f"{m['name']} ({m['role']}) ({m['email']})" for m in managers]
                         
                         current_manager_idx = 0
                         if view_emp.get('manager_id'):
-                            current_manager = db.get_user_by_id(view_emp['manager_id'])
+                            current_manager = cached_get_user_by_id(view_emp['manager_id'])
                             if current_manager:
                                 current_manager_str = f"{current_manager['name']} ({current_manager['email']})"
                                 if current_manager_str in manager_options:
@@ -11832,6 +12269,7 @@ def display_employee_management():
                                 }
                                 
                                 if db.update_user(view_emp['id'], updates):
+                                    load_all_data.clear()
                                     st.success(f"✅ Employee {edit_name} updated successfully!")
                                     del st.session_state.viewing_employee_details
                                     st.rerun()
@@ -11854,25 +12292,32 @@ def display_employee_management():
     
     # ===== MANAGE TEAMS TAB =====
     with tab3:
-        st.subheader("Assign Employees to Managers")
+        st.subheader("Assign Employees to Supervisors")
         
-        managers = [u for u in db.get_all_users() if u['role'] == 'Manager']
-        employees = [u for u in db.get_all_users() if u['role'] == 'Employee']
+        all_users_fresh = cached_get_all_users()
+        managers = [u for u in all_users_fresh if u['role'] in ['CMD', 'VP', 'HR', 'Manager']]
+        employees = [u for u in all_users_fresh if u['role'] == 'Employee']
         
         if not managers:
-            st.info("No managers found. Create a manager first.")
+            st.info("No supervisors found. Create a manager first.")
         elif not employees:
             st.info("No employees found. Create employees first.")
         else:
             selected_manager_name = st.selectbox(
-                "Select Manager",
-                [f"{m['name']} ({m['email']})" for m in managers]
+                "Select Supervisor",
+                [f"{m['name']} ({m['role']}) - {m['email']}" for m in managers]
             )
             
-            manager_email = selected_manager_name.split('(')[1].strip(')')
-            selected_manager = next(m for m in managers if m['email'] == manager_email)
+            # Parse email safely - format is "Name (ROLE) - email"
+            manager_email = selected_manager_name.split(' - ')[-1].strip()
+            selected_manager = next((m for m in managers if m['email'] == manager_email), None)
             
-            current_team = db.get_team_members(selected_manager['id'])
+            if not selected_manager:
+                st.error("❌ Selected supervisor not found. Please reselect.")
+                st.stop()
+
+            
+            current_team = cached_get_team_members(selected_manager['id'])
             st.write(f"**Current Team Size:** {len(current_team)}")
             
             unassigned_employees = [e for e in employees if not e.get('manager_id')]
@@ -11905,17 +12350,28 @@ def display_employee_management():
     with tab4:
         st.subheader("All Teams Overview")
         
-        managers = [u for u in db.get_all_users() if u['role'] == 'Manager']
-        for manager in managers:
-            with st.expander(f"👔 {manager['name']}'s Team ({manager.get('department', 'N/A')})"):
-                team = db.get_team_members(manager['id'])
-                
+        all_users_fresh = cached_get_all_users()
+        seen_ids = set()
+        managers = []
+        for u in all_users_fresh:
+            if u['role'] in ['CMD', 'VP', 'HR', 'Manager'] and u['id'] not in seen_ids:
+                seen_ids.add(u['id'])
+                managers.append(u)
+        
+        for mgr_idx, manager in enumerate(managers):
+            team = cached_get_team_members(manager['id'])
+            
+            role_icons = {'CMD': '👑', 'VP': '🎖️', 'HR': '🏢', 'Manager': '👔'}
+            icon = role_icons.get(manager['role'], '👤')
+            
+            with st.expander(f"{icon} {manager['name']} ({manager['role']}) — {manager.get('department', 'N/A')} | Team: {len(team)} member(s)"):
                 if team:
                     team_data = []
                     for member in team:
                         team_data.append({
                             'Name': member['name'],
                             'Email': member['email'],
+                            'Role': member['role'],
                             'Designation': member.get('designation', 'N/A'),
                             'Department': member.get('department', 'N/A')
                         })
@@ -11923,25 +12379,30 @@ def display_employee_management():
                     df = pd.DataFrame(team_data)
                     st.dataframe(df, use_container_width=True)
                     
-                    # Option to remove members
                     remove_member = st.selectbox(
                         "Remove Member",
                         ["None"] + [m['name'] for m in team],
-                        key=f"remove_{manager['id']}"
+                        key=f"remove_{mgr_idx}_{manager['id'][:8]}"
                     )
                     
-                    if remove_member != "None" and st.button(f"Remove {remove_member}", key=f"btn_remove_{manager['id']}"):
-                        member_id = next(m['id'] for m in team if m['name'] == remove_member)
-                        result = db.update_user(member_id, {'manager_id': None})
-                        if result:
-                            st.success(f"✅ Removed {remove_member} from team")
-                            st.cache_data.clear()
-                            st.rerun()
+                    if remove_member != "None" and st.button(
+                        f"Remove {remove_member}",
+                        key=f"btn_remove_{mgr_idx}_{manager['id'][:8]}"
+                    ):
+                        member_id = next(
+                            (m['id'] for m in team if m['name'] == remove_member), None
+                        )
+                        if member_id:
+                            result = db.update_user(member_id, {'manager_id': None})
+                            if result:
+                                st.success(f"✅ Removed {remove_member} from team")
+                                st.rerun()
+                            else:
+                                st.error(f"❌ Failed to remove {remove_member}")
                         else:
-                            st.error(f"❌ Failed to remove {remove_member}. Check database connection.")
+                            st.error("❌ Member not found")
                 else:
-                    st.info("No team members yet")
-
+                    st.info(f"No team members assigned to {manager['name']} yet")
     
 
 def display_approval_page():
@@ -11949,7 +12410,7 @@ def display_approval_page():
     user = st.session_state.user
     
     if user['role'] not in ['Manager', 'HR', 'VP']:
-        st.warning("⚠️ Only Managers can access this page")
+        st.warning("⚠️ You don't have permission to access this page")
         return
     
     st.title("✅ Approval Dashboard")
@@ -11963,22 +12424,22 @@ def display_approval_page():
         
         # Get pending goal approvals
         if user['role'] == 'Manager':
-            pending_goals = db.get_pending_approvals(user['id'])
+            pending_goals = cached_get_pending_approvals(user['id'])
         elif user['role'] == 'HR':
             pending_goals = []
             # Get employees directly under this HR user
-            hr_team = db.get_team_members(user['id'])
+            hr_team = cached_get_team_members(user['id'])
             for u in hr_team:
-                user_goals = db.get_user_all_goals(u['id'])
+                user_goals = cached_get_user_all_goals(u['id'])
                 for g in user_goals:
                     if g.get('approval_status') == 'pending':
                         pending_goals.append(g)
             
             # Also get employees with no manager assigned at all
-            all_users = db.get_all_users()
+            all_users = cached_get_all_users()
             for u in all_users:
                 if u['role'] == 'Employee' and not u.get('manager_id'):
-                    user_goals = db.get_user_all_goals(u['id'])
+                    user_goals = cached_get_user_all_goals(u['id'])
                     for g in user_goals:
                         if g.get('approval_status') == 'pending':
                             # Avoid duplicates
@@ -11995,7 +12456,7 @@ def display_approval_page():
             
             for goal in pending_goals:
                 # Get employee info
-                employee = db.get_user_by_id(goal['user_id'])
+                employee = cached_get_user_by_id(goal['user_id'])
                 employee_name = employee['name'] if employee else 'Unknown'
                 
                 with st.expander(f"📋 {goal['goal_title']} - {employee_name}"):
@@ -12033,10 +12494,11 @@ def display_approval_page():
                                 user['id'],
                                 user['name']   # 👈 ADD THIS
                             ):
+                                load_all_data.clear()
                                 st.success("✅ Goal approved!")
                                 
                                 # Notify employee and HR
-                                employee = db.get_user_by_id(goal['user_id'])
+                                employee = cached_get_user_by_id(goal['user_id'])
                                 if employee:
                                     notify_goal_approved(goal, user, employee)
                                 
@@ -12062,6 +12524,7 @@ def display_approval_page():
                                                 user['id'],
                                                 reason
                                             ):
+                                                load_all_data.clear()
                                                 st.success("Goal rejected")
                                                 del st.session_state[f'rejecting_goal_{goal["goal_id"]}']
                                                 st.rerun()
@@ -12081,16 +12544,16 @@ def display_approval_page():
         
         # Get team members
         if user['role'] == 'Manager':
-            team_members = db.get_team_members(user['id'])
+            team_members = cached_get_team_members(user['id'])
         elif user['role'] in ['HR', 'VP']:
-            all_users = db.get_all_users()
+            all_users = cached_get_all_users()
             team_members = [u for u in all_users if u['role'] == 'Employee']
         else:
             team_members = []
-        
+
         pending_achievements = []
         for member in team_members:
-            goals = db.get_user_all_goals(member['id'])
+            goals = cached_get_user_all_goals(member['id'])
             for goal in goals:
                 if goal.get('achievement_approval_status') == 'pending':
                     goal['employee'] = member
@@ -12105,7 +12568,7 @@ def display_approval_page():
             for goal in pending_achievements:
                 employee = goal['employee']
                 
-                with st.expander(f" {goal['goal_title']} - {employee['name']}"):
+                with st.expander(f"📊 {goal['goal_title']} - {employee['name']}"):
                     col1, col2 = st.columns([2, 1])
                     
                     with col1:
@@ -12161,6 +12624,7 @@ def display_approval_page():
                             }
                             
                             if db.update_goal(goal['goal_id'], updates):
+                                load_all_data.clear()
                                 st.success("✅ Achievements approved!")
                                 
                                 # Notify employee
@@ -12198,6 +12662,7 @@ def display_approval_page():
                                             }
                                             
                                             if db.update_goal(goal['goal_id'], updates):
+                                                load_all_data.clear()
                                                 st.success("Achievements rejected")
                                                 
                                                 # Notify employee
@@ -12311,7 +12776,7 @@ def render_sidebar():
         
         if role in ['Manager', 'HR']:
             # Get pending count
-            pending_count = len(db.get_pending_approvals(user['id']))
+            pending_count = len(cached_get_pending_approvals(user['id']))
             
             approval_label = f" Approvals ({pending_count})" if pending_count > 0 else " Approvals"
             
@@ -12347,6 +12812,24 @@ def render_sidebar():
             save_session_to_storage()
             st.rerun()
         
+        if role == 'HR':
+            if st.button("📤 Bulk Upload Goals", use_container_width=True, key="nav_bulk_upload"):
+                st.session_state.page = 'bulk_upload'
+                st.rerun()
+        
+        if role in ['HR', 'CMD', 'VP']:
+            st.markdown("---")
+            excel_file = export_all_goals_excel()
+            if excel_file:
+                st.download_button(
+                    label="📥 Download All Goals",
+                    data=excel_file,
+                    file_name=f"All_Goals_{date.today()}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="sidebar_download_all_goals"
+                )
+
         
         # Settings
         st.markdown("---")
@@ -12397,6 +12880,7 @@ def main():
                 # Option 2: Redirect to login page with action stored
                 
                 if db.update_goal_approval(goal['goal_id'], 'approved', token_data['approved_by']):
+                    load_all_data.clear()
                     db.mark_token_used(token)
                     st.success("✅ Goal approved successfully!")
                     st.balloons()
@@ -12408,6 +12892,7 @@ def main():
                 if st.button("Confirm Rejection"):
                     if reason.strip():
                         if db.update_goal_approval(goal['goal_id'], 'rejected', token_data['approved_by'], reason):
+                            load_all_data.clear()
                             db.mark_token_used(token)
                             st.success("Goal rejected")
         else:
@@ -12623,6 +13108,8 @@ def main():
         display_analytics_page()
     elif page == 'feedback_history':
         display_feedback_history()
+    elif page == 'bulk_upload':
+        display_bulk_upload()
     elif page == 'profile':
         display_profile()
     elif page == 'permissions':
@@ -12633,6 +13120,7 @@ def main():
         # Default to dashboard
         st.session_state.page = 'dashboard'
         st.rerun()
+
 
 st.markdown(
     """

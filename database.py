@@ -15,12 +15,11 @@ from typing import Dict, List, Optional, Any
 import pytz
 import secrets
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 IST = ZoneInfo("Asia/Kolkata")
 
 load_dotenv()
-
 def normalize_department(dept_name):
     """Normalize department name to be case-insensitive and handle variations"""
     if not dept_name or dept_name.strip() == '':
@@ -74,7 +73,7 @@ def get_supabase_client() -> Client:
 #                 pass
         
 #         if not url or not key:
-#             st.error("⚠️ Supabase credentials not found!")
+#             st.error(" Supabase credentials not found!")
 #             st.info("""
 #             **Setup Instructions:**
             
@@ -456,7 +455,7 @@ class Database:
 
             # Optional: automatically set created_at if your table has it
             if 'created_at' not in goal_data:
-                goal_data['created_at'] = datetime.utcnow().isoformat()
+                goal_data['created_at'] = datetime.now(timezone.utc).isoformat()
 
             # Remove any keys that are None (except if you explicitly want to store NULL)
             cleaned_data = {
@@ -667,7 +666,7 @@ class Database:
         """Get notifications for user - simplified version"""
         return []
     
-    def get_user_goal_stats(self, user_id):
+    def get_user_goal_stats(self, user_id, year=None):
         """Get user goal statistics - FILTERS TO APPROVED GOALS FOR EMPLOYEES"""
         try:
             # Get user to check role
@@ -1090,3 +1089,12 @@ class Database:
             WHERE access_level IS NULL;
             """)
             return False
+
+# ============================================
+# SHARED CLIENT
+# ============================================
+
+_supabase = get_supabase_client()
+
+def clear_all_cache():
+    st.cache_data.clear()
